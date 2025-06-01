@@ -2,7 +2,7 @@
 """
 Audiobook TTS Generator
 Converts text files and ebooks to audiobooks using Chatterbox TTS
-Supports chunking, parallel processing, resume capability, and voice cloning
+Supports chunking, parallel processing, resume capability, voice cloning, and MP3 conversion
 """
 
 import argparse
@@ -12,6 +12,8 @@ import sys
 import time
 import json
 import re
+import subprocess
+import shutil
 from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -42,6 +44,130 @@ def setup_mac_compatibility():
     
     torch.load = patched_torch_load
     return device
+
+class AudioConverter:
+    """Handles audio format conversion using FFmpeg"""
+    
+    @staticmethod
+    def check_ffmpeg_available() -> bool:
+        """Check if FFmpeg is available on the system"""
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-version'], 
+                capture_output=True, 
+                text=True, 
+                timeout=10
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+            return False
+    
+    @staticmethod
+    def convert_to_mp3(wav_file: Path, mp3_file: Path, bitrate: str = "128k", 
+                       remove_wav: bool = False) -> bool:
+        """Convert WAV file to MP3 using FFmpeg"""
+        
+        if not AudioConverter.check_ffmpeg_available():
+            logging.error("❌ FFmpeg not found! Please install FFmpeg for MP3 conversion")
+            logging.error("   Install guide: https://ffmpeg.org/download.html")
+            return False
+        
+        try:
+            # FFmpeg command for high-quality audiobook conversion
+            cmd = [
+                'ffmpeg',
+                '-i', str(wav_file),          # Input file
+                '-codec:a', 'libmp3lame',     # MP3 encoder
+                '-b:a', bitrate,              # Bitrate
+                '-ar', '22050',               # Sample rate (good for speech)
+                '-ac', '1',                   # Mono (smaller file, fine for audiobooks)
+                '-compression_level', '2',    # Good compression vs speed balance
+                '-y',                         # Overwrite output file
+                str(mp3_file)
+            ]
+            
+            logging.info(f"🔄 Converting {wav_file.name} to MP3 (bitrate: {bitrate})...")
+            
+            result = subprocess.run(
+                cmd, 
+                capture_output=True, 
+                text=True, 
+                timeout=300  # 5 minute timeout
+            )
+            
+            if result.returncode == 0:
+                # Check if output file was created and has reasonable size
+                if mp3_file.exists() and mp3_file.stat().st_size > 1024:  # At least 1KB
+                    
+                    # Calculate compression ratio
+                    wav_size = wav_file.stat().st_size
+                    mp3_size = mp3_file.stat().st_size
+                    ratio = (1 - mp3_size / wav_size) * 100
+                    
+                    logging.info(f"✅ MP3 conversion successful!")
+                    logging.info(f"   Size reduction: {ratio:.1f}% ({wav_size//1024//1024}MB → {mp3_size//1024//1024}MB)")
+                    
+                    # Remove WAV file if requested
+                    if remove_wav:
+                        try:
+                            wav_file.unlink()
+                            logging.info(f"🗑️ Removed original WAV file: {wav_file.name}")
+                        except Exception as e:
+                            logging.warning(f"Could not remove WAV file: {e}")
+                    
+                    return True
+                else:
+                    logging.error(f"❌ MP3 conversion failed: output file missing or too small")
+                    return False
+            else:
+                logging.error(f"❌ FFmpeg conversion failed:")
+                logging.error(f"   stdout: {result.stdout}")
+                logging.error(f"   stderr: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logging.error(f"❌ MP3 conversion timed out for {wav_file.name}")
+            return False
+        except Exception as e:
+            logging.error(f"❌ MP3 conversion error: {e}")
+            return False
+    
+    @staticmethod
+    def get_audio_info(file_path: Path) -> dict:
+        """Get audio file information using FFprobe"""
+        try:
+            cmd = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_format',
+                '-show_streams',
+                str(file_path)
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                info = json.loads(result.stdout)
+                
+                # Extract relevant information
+                format_info = info.get('format', {})
+                stream_info = info.get('streams', [{}])[0]
+                
+                return {
+                    'duration': float(format_info.get('duration', 0)),
+                    'size': int(format_info.get('size', 0)),
+                    'bitrate': int(format_info.get('bit_rate', 0)),
+                    'sample_rate': int(stream_info.get('sample_rate', 0)),
+                    'channels': int(stream_info.get('channels', 0)),
+                    'codec': stream_info.get('codec_name', 'unknown')
+                }
+            else:
+                return {}
+                
+        except Exception as e:
+            logging.warning(f"Could not get audio info: {e}")
+            return {}
 
 class TextProcessor:
     """Handles different text file formats"""
@@ -415,7 +541,8 @@ class AudiobookTTS:
     """Main TTS audiobook generator"""
     
     def __init__(self, voice_file: Optional[str] = None, max_workers: int = 2, 
-                 exaggeration: float = 0.8, cfg_weight: float = 0.8, pitch_shift: float = 0.0):
+                 exaggeration: float = 0.8, cfg_weight: float = 0.8, pitch_shift: float = 0.0,
+                 mp3_bitrate: str = "128k", mp3_enabled: bool = False, remove_wav: bool = False):
         self.device = setup_mac_compatibility()
         logging.info(f"Initializing Chatterbox TTS on {self.device}...")
         
@@ -427,6 +554,19 @@ class AudiobookTTS:
         self.exaggeration = exaggeration
         self.cfg_weight = cfg_weight
         self.pitch_shift = pitch_shift  # Semitones to shift pitch
+        
+        # MP3 conversion settings
+        self.mp3_enabled = mp3_enabled
+        self.mp3_bitrate = mp3_bitrate
+        self.remove_wav = remove_wav
+        
+        # Check FFmpeg availability if MP3 is enabled
+        if self.mp3_enabled:
+            if not AudioConverter.check_ffmpeg_available():
+                logging.warning("⚠️ FFmpeg not found - MP3 conversion will be disabled")
+                self.mp3_enabled = False
+            else:
+                logging.info(f"🎵 MP3 conversion enabled (bitrate: {mp3_bitrate})")
         
         # Warmup
         with torch.no_grad():
@@ -659,9 +799,9 @@ class AudiobookTTS:
         for segment in audio_segments[1:]:
             combined_audio = torch.cat([combined_audio, pause, segment], dim=1)
         
-        # Save final audiobook
-        final_file = output_dir / "audiobook.wav"
-        ta.save(str(final_file), combined_audio, sample_rate)
+        # Save final audiobook as WAV
+        final_wav_file = output_dir / "audiobook.wav"
+        ta.save(str(final_wav_file), combined_audio, sample_rate)
         
         # Calculate statistics
         total_duration = combined_audio.shape[1] / sample_rate
@@ -669,12 +809,57 @@ class AudiobookTTS:
         minutes = int((total_duration % 3600) // 60)
         seconds = int(total_duration % 60)
         
-        logging.info(f"🎉 Audiobook complete!")
-        logging.info(f"   File: {final_file}")
+        logging.info(f"🎉 WAV audiobook complete!")
+        logging.info(f"   File: {final_wav_file}")
         logging.info(f"   Duration: {hours:02d}:{minutes:02d}:{seconds:02d}")
         logging.info(f"   Chunks used: {len(audio_segments)}/{total_chunks}")
         
+        # Convert to MP3 if enabled
+        if self.mp3_enabled:
+            final_mp3_file = output_dir / "audiobook.mp3"
+            logging.info("🔄 Converting final audiobook to MP3...")
+            
+            conversion_success = AudioConverter.convert_to_mp3(
+                wav_file=final_wav_file,
+                mp3_file=final_mp3_file,
+                bitrate=self.mp3_bitrate,
+                remove_wav=self.remove_wav
+            )
+            
+            if conversion_success:
+                # Get audio info for the MP3
+                mp3_info = AudioConverter.get_audio_info(final_mp3_file)
+                if mp3_info:
+                    logging.info(f"📱 MP3 audiobook details:")
+                    logging.info(f"   File: {final_mp3_file}")
+                    logging.info(f"   Size: {mp3_info.get('size', 0) // 1024 // 1024}MB")
+                    logging.info(f"   Bitrate: {mp3_info.get('bitrate', 0) // 1000}kbps")
+                    logging.info(f"   Format: {mp3_info.get('codec', 'mp3')}")
+                
+                # Clean up individual chunk files if requested
+                if self.remove_wav:
+                    self._cleanup_chunk_files(output_dir, total_chunks)
+        
         return output_dir
+    
+    def _cleanup_chunk_files(self, output_dir: Path, total_chunks: int):
+        """Remove individual chunk WAV files after successful conversion"""
+        removed_count = 0
+        
+        logging.info("🧹 Cleaning up individual chunk files...")
+        
+        for i in range(total_chunks):
+            chunk_file = output_dir / f"chunk_{i:04d}.wav"
+            
+            if chunk_file.exists():
+                try:
+                    chunk_file.unlink()
+                    removed_count += 1
+                except Exception as e:
+                    logging.warning(f"Could not remove chunk file {chunk_file.name}: {e}")
+        
+        if removed_count > 0:
+            logging.info(f"🗑️ Removed {removed_count} chunk files")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -684,8 +869,9 @@ def main():
 Examples:
   python audiobook_tts.py book.txt
   python audiobook_tts.py novel.fb2 --voice voices/narrator.wav
-  python audiobook_tts.py story.epub --limit-minutes 30
-  python audiobook_tts.py document.txt --voice voices/reader.wav --limit-minutes 60
+  python audiobook_tts.py story.epub --limit-minutes 30 --mp3
+  python audiobook_tts.py document.txt --voice voices/reader.wav --mp3 --mp3-bitrate 192k
+  python audiobook_tts.py book.txt --mp3 --remove-wav --mp3-bitrate 256k
         """
     )
     
@@ -733,6 +919,27 @@ Examples:
         help="Pitch shift in semitones (+/-4, positive=higher, negative=lower)"
     )
     
+    # MP3 conversion arguments
+    parser.add_argument(
+        "--mp3",
+        action="store_true",
+        help="Convert final audiobook to MP3 format"
+    )
+    
+    parser.add_argument(
+        "--mp3-bitrate",
+        type=str,
+        default="128k",
+        choices=["64k", "96k", "128k", "160k", "192k", "256k", "320k"],
+        help="MP3 bitrate for conversion (default: 128k)"
+    )
+    
+    parser.add_argument(
+        "--remove-wav",
+        action="store_true",
+        help="Remove WAV files after MP3 conversion (saves disk space)"
+    )
+    
     args = parser.parse_args()
     
     # Validate input file
@@ -746,6 +953,11 @@ Examples:
         logging.error(f"Voice file not found: {args.voice}")
         sys.exit(1)
     
+    # Validate MP3 settings
+    if args.remove_wav and not args.mp3:
+        logging.warning("--remove-wav specified without --mp3, ignoring...")
+        args.remove_wav = False
+    
     # Log configuration
     logging.info("🎙️ Audiobook TTS Generator Starting...")
     logging.info(f"   Input: {input_file}")
@@ -755,6 +967,12 @@ Examples:
     logging.info(f"   Time limit: {args.limit_minutes or 'None'} minutes")
     logging.info(f"   Workers: {args.workers}")
     
+    if args.mp3:
+        logging.info(f"   MP3 conversion: enabled (bitrate: {args.mp3_bitrate})")
+        logging.info(f"   Remove WAV files: {args.remove_wav}")
+    else:
+        logging.info("   MP3 conversion: disabled")
+    
     try:
         # Initialize TTS generator
         tts_generator = AudiobookTTS(
@@ -762,7 +980,10 @@ Examples:
             max_workers=args.workers,
             exaggeration=args.exaggeration,
             cfg_weight=args.cfg_weight,
-            pitch_shift=args.pitch_shift
+            pitch_shift=args.pitch_shift,
+            mp3_enabled=args.mp3,
+            mp3_bitrate=args.mp3_bitrate,
+            remove_wav=args.remove_wav
         )
         
         # Process audiobook
@@ -772,6 +993,21 @@ Examples:
         )
         
         logging.info(f"🎉 Audiobook generation complete! Check: {output_dir}")
+        
+        # List final output files
+        final_files = []
+        wav_file = output_dir / "audiobook.wav"
+        mp3_file = output_dir / "audiobook.mp3"
+        
+        if wav_file.exists():
+            final_files.append(f"📄 WAV: {wav_file}")
+        if mp3_file.exists():
+            final_files.append(f"🎵 MP3: {mp3_file}")
+        
+        if final_files:
+            logging.info("📋 Final output files:")
+            for file_info in final_files:
+                logging.info(f"   {file_info}")
         
     except KeyboardInterrupt:
         logging.info("⏹️ Generation interrupted by user")

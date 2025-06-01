@@ -1,6 +1,6 @@
 # Audiobook TTS Generator Suite
 
-A comprehensive collection of Python scripts for converting text files and ebooks into high-quality audiobooks using Chatterbox TTS. Optimized for Apple Silicon with voice cloning, pitch control, and parallel processing.
+A comprehensive collection of Python scripts for converting text files and ebooks into high-quality audiobooks using Chatterbox TTS. Optimized for Apple Silicon with voice cloning, pitch control, parallel processing, and automatic MP3 conversion.
 
 ## 🎯 Quick Start
 
@@ -8,14 +8,14 @@ A comprehensive collection of Python scripts for converting text files and ebook
 # Basic audiobook generation
 python audiobook_tts.py your_book.txt
 
-# With custom voice and pitch adjustment
-python audiobook_tts.py book.epub --voice voices/narrator.wav --exaggeration 0.3 --pitch-shift +1
+# With custom voice, pitch adjustment, and MP3 output
+python audiobook_tts.py book.epub --voice voices/narrator.wav --exaggeration 0.3 --pitch-shift +1 --mp3
 ```
 
 ## 📚 Scripts Overview
 
 ### 📖 `audiobook_tts.py` - Main Audiobook Generator
-Converts text files and ebooks into complete audiobooks with professional features.
+Converts text files and ebooks into complete audiobooks with professional features and automatic MP3 conversion.
 
 **Features:**
 - Supports `.txt`, `.epub`, `.fb2`, `.md` files
@@ -25,23 +25,43 @@ Converts text files and ebooks into complete audiobooks with professional featur
 - Voice cloning support
 - Time limits and progress tracking
 - Pitch and voice characteristic control
+- **🎵 Automatic MP3 conversion with FFmpeg**
+- **📱 Configurable bitrates for quality vs file size**
+- **🧹 Optional WAV file cleanup to save disk space**
 
 **Usage:**
 ```bash
 # Basic usage
 python audiobook_tts.py book.txt
 
-# Advanced usage
+# Advanced usage with MP3 conversion
 python audiobook_tts.py novel.epub \
   --voice voices/narrator.wav \
   --limit-minutes 60 \
   --exaggeration 0.5 \
   --cfg-weight 0.7 \
   --pitch-shift -1.5 \
-  --workers 3
+  --workers 3 \
+  --mp3 \
+  --mp3-bitrate 192k \
+  --remove-wav
+
+# High-quality MP3 for archival
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k
+
+# Space-saving MP3 for mobile devices
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --remove-wav
 ```
 
-**Output:** Creates folder `book/` with individual chunks and final `audiobook.wav`
+**MP3 Conversion Options:**
+- `--mp3`: Enable MP3 conversion using FFmpeg
+- `--mp3-bitrate`: Choose quality (`64k`, `96k`, `128k`, `160k`, `192k`, `256k`, `320k`)
+- `--remove-wav`: Delete WAV files after MP3 conversion to save space
+
+**Output:** Creates folder `book/` with:
+- Individual chunks: `chunk_0001.wav`, `chunk_0002.wav`, etc.
+- Final audiobook: `audiobook.wav` (always created)
+- MP3 version: `audiobook.mp3` (if `--mp3` flag used)
 
 ---
 
@@ -86,7 +106,7 @@ python simple_epub_reader.py problematic_book.epub
 
 **Output:** Creates `book_extracted.txt` with clean text, then use:
 ```bash
-python audiobook_tts.py book_extracted.txt
+python audiobook_tts.py book_extracted.txt --mp3
 ```
 
 ---
@@ -157,6 +177,34 @@ pip install torch torchaudio chatterbox-tts
 # Optional dependencies for enhanced features
 pip install ebooklib beautifulsoup4  # Better EPUB support
 pip install sounddevice              # For voice recording
+
+# Required for MP3 conversion
+# Install FFmpeg (required for --mp3 flag)
+```
+
+### FFmpeg Installation for MP3 Conversion
+
+**macOS (using Homebrew):**
+```bash
+brew install ffmpeg
+```
+
+**Windows:**
+```bash
+# Download from https://ffmpeg.org/download.html
+# Or using chocolatey:
+choco install ffmpeg
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt update
+sudo apt install ffmpeg
+```
+
+**Verification:**
+```bash
+ffmpeg -version  # Should show FFmpeg version info
 ```
 
 ### Apple Silicon (M4 Mac) Setup
@@ -174,14 +222,14 @@ The scripts are optimized for M4 Macs with automatic MPS (Metal Performance Shad
    python voice_pitch_tuner.py --interactive
    ```
 
-3. **Generate audiobook**:
+3. **Generate audiobook with MP3 conversion**:
    ```bash
-   python audiobook_tts.py book.epub --exaggeration 0.3 --cfg-weight 0.4
+   python audiobook_tts.py book.epub --exaggeration 0.3 --cfg-weight 0.4 --mp3 --mp3-bitrate 160k
    ```
 
 4. **If interrupted, resume**:
    ```bash
-   python audiobook_tts.py book.epub  # Automatically resumes
+   python audiobook_tts.py book.epub --mp3  # Automatically resumes and converts to MP3
    ```
 
 ## 📁 Directory Structure
@@ -193,7 +241,8 @@ your_project/
 │   ├── chunk_0001.wav      # Individual segments
 │   ├── chunk_0002.wav
 │   ├── progress.json       # Resume data
-│   └── audiobook.wav       # Final combined book
+│   ├── audiobook.wav       # Final combined book (WAV)
+│   └── audiobook.mp3       # Final combined book (MP3, if --mp3 used)
 ├── pitch_tests/            # Voice tuning samples
 ├── voice_library/          # Extracted voice samples
 └── extracted_voices/       # Harvested voice segments
@@ -206,6 +255,26 @@ your_project/
 - **Optimal Chunk Size:** Default 200 characters works best
 - **Memory Management:** Scripts automatically clear GPU cache
 - **Resume Feature:** Large books can be processed in sessions with `--limit-minutes`
+- **MP3 Conversion:** Happens automatically after WAV generation completes
+
+## 🎵 MP3 Quality Guidelines
+
+**Bitrate Recommendations:**
+- **64k-96k:** Mobile devices, very small files, basic quality
+- **128k:** Good quality, standard for audiobooks (default)
+- **160k-192k:** High quality, good balance of size vs quality
+- **256k-320k:** Excellent quality, larger files, archival purposes
+
+**File Size Comparison (1-hour audiobook):**
+- WAV (original): ~600MB
+- MP3 128k: ~60MB (90% smaller)
+- MP3 192k: ~90MB (85% smaller)
+- MP3 320k: ~150MB (75% smaller)
+
+**Audio Optimization for Speech:**
+- Sample rate: 22kHz (perfect for speech)
+- Channels: Mono (smaller files, adequate for audiobooks)
+- Compression: Optimized for speech content
 
 ## 🎯 Voice Quality Guidelines
 
@@ -233,25 +302,69 @@ your_project/
 - Test with short samples before full books
 - Check voice sample quality with `voice_harvester.py`
 
+**MP3 Conversion Issues:**
+- Ensure FFmpeg is installed: `ffmpeg -version`
+- Check FFmpeg installation guide above
+- MP3 conversion automatically disabled if FFmpeg not found
+- Use `--mp3-bitrate` to adjust quality vs file size
+
 **Performance:**
 - Ensure you're using MPS acceleration (shows in logs)
 - Reduce `--workers` if experiencing memory issues
 - Use `--limit-minutes` for very large books
+- MP3 conversion adds minimal processing time
 
 ## 📋 Examples
 
 ```bash
-# Complete workflow with custom voice
+# Complete workflow with custom voice and MP3
 python voice_harvester.py --extract narrator_audiobook.mp3
 python voice_pitch_tuner.py --voice extracted_voices/voice_segment_003.wav --interactive
-python audiobook_tts.py novel.epub --voice extracted_voices/voice_segment_003.wav --exaggeration 0.4
+python audiobook_tts.py novel.epub \
+  --voice extracted_voices/voice_segment_003.wav \
+  --exaggeration 0.4 \
+  --mp3 \
+  --mp3-bitrate 160k \
+  --remove-wav
 
-# Quick audiobook with pitch adjustment
-python audiobook_tts.py book.txt --pitch-shift -1 --limit-minutes 30
+# Quick audiobook with pitch adjustment and MP3
+python audiobook_tts.py book.txt --pitch-shift -1 --limit-minutes 30 --mp3
 
-# Debug problematic EPUB
+# High-quality archival version
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k
+
+# Mobile-optimized version with cleanup
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --remove-wav
+
+# Debug problematic EPUB with MP3 output
 python epub_preview.py problematic.epub --save clean_text.txt
-python audiobook_tts.py clean_text.txt
+python audiobook_tts.py clean_text.txt --mp3 --mp3-bitrate 128k
+```
+
+## 🎛️ Advanced MP3 Options
+
+**Space-Saving Workflow:**
+```bash
+# Generate with immediate cleanup
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 128k --remove-wav
+# Result: Only MP3 files remain, maximum disk space savings
+```
+
+**Quality Comparison Workflow:**
+```bash
+# Generate multiple quality versions
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 128k
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 192k
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k
+# Compare file sizes and audio quality
+```
+
+**Batch Processing with MP3:**
+```bash
+# Process multiple books with consistent settings
+for book in *.epub; do
+    python audiobook_tts.py "$book" --mp3 --mp3-bitrate 160k --remove-wav
+done
 ```
 
 ## ⚖️ Legal Notice
@@ -264,4 +377,4 @@ Only use voice samples from:
 
 ---
 
-*Optimized for Apple Silicon Macs with Chatterbox TTS*
+*Optimized for Apple Silicon Macs with Chatterbox TTS and FFmpeg MP3 conversion*
