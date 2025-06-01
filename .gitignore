@@ -1,0 +1,9 @@
+venv/*
+.DS_Store
+extracted_voices/
+*.mp3
+*.epub
+*.txt
+*.wav
+*.json
+*.aifc
