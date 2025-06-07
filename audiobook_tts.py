@@ -735,7 +735,7 @@ class AudiobookTTS:
     def __init__(self, voice_file: Optional[str] = None, max_workers: int = 2, 
                  exaggeration: float = 0.8, cfg_weight: float = 0.8, pitch_shift: float = 0.0,
                  mp3_bitrate: str = "128k", mp3_enabled: bool = False, remove_wav: bool = False,
-                 split_minutes: int = 5, memory_cleanup_interval: int = 10):
+                 split_minutes: int = 5, memory_cleanup_interval: int = 5, debug_memory: bool = False):
         self.device = setup_mac_compatibility()
         logging.info(f"Initializing Chatterbox TTS on {self.device}...")
         
@@ -778,9 +778,14 @@ class AudiobookTTS:
                 if self.split_minutes > 0:
                     logging.info(f"✂️ File splitting enabled (max {split_minutes} minutes per file)")
         
-        # Initialize memory tracking
+        # Initialize memory tracking and performance monitoring
         self.chunks_since_cleanup = 0
         self.cleanup_interval = memory_cleanup_interval  # Clear cache every N chunks
+        self.performance_history = []  # Track processing times to detect slowdown
+        self.adaptive_cleanup = True  # Enable adaptive cleanup based on performance
+        self.severe_degradation_count = 0  # Count severe performance issues
+        self.model_reinit_threshold = 2  # Reinitialize model after N severe degradations (lowered for faster recovery)
+        self.debug_memory = debug_memory  # Enable detailed memory debugging
         
         # Warmup
         with torch.no_grad():
@@ -822,69 +827,263 @@ class AudiobookTTS:
     
     def _get_memory_usage(self) -> dict:
         """Get current memory usage statistics"""
-        import psutil
-        process = psutil.Process()
-        memory_info = process.memory_info()
+        stats = {}
         
-        stats = {
-            'rss_mb': memory_info.rss / 1024 / 1024,  # Physical memory
-            'vms_mb': memory_info.vms / 1024 / 1024,  # Virtual memory
-        }
-        
-        # Add GPU memory if available
-        if self.device == "mps" and hasattr(torch.mps, 'current_allocated_memory'):
+        try:
+            # Get basic system memory info
+            import psutil
+            system_memory = psutil.virtual_memory()
+            stats['system_used_mb'] = system_memory.used / 1024 / 1024
+            stats['system_available_mb'] = system_memory.available / 1024 / 1024
+            stats['system_percent'] = system_memory.percent
+            
+            # Get current process memory
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            stats['rss_mb'] = memory_info.rss / 1024 / 1024
+            stats['vms_mb'] = memory_info.vms / 1024 / 1024
+            
+        except Exception as e:
+            # Fallback to basic resource tracking
+            import resource
             try:
-                stats['gpu_allocated_mb'] = torch.mps.current_allocated_memory() / 1024 / 1024
+                usage = resource.getrusage(resource.RUSAGE_SELF)
+                stats['rss_mb'] = usage.ru_maxrss / 1024  # macOS reports in bytes
+                stats['system_percent'] = 0.0  # Can't determine without psutil
             except:
-                pass
-        elif self.device == "cuda":
-            try:
+                stats['rss_mb'] = 0
+                stats['system_percent'] = 0.0
+        
+        try:
+            # Add GPU memory if available (this is most important)
+            if self.device == "mps":
+                # MPS memory tracking
+                if hasattr(torch.mps, 'current_allocated_memory'):
+                    stats['gpu_allocated_mb'] = torch.mps.current_allocated_memory() / 1024 / 1024
+                else:
+                    stats['gpu_allocated_mb'] = 0
+                    
+                if hasattr(torch.mps, 'max_memory_allocated'):
+                    stats['gpu_max_allocated_mb'] = torch.mps.max_memory_allocated() / 1024 / 1024
+                else:
+                    stats['gpu_max_allocated_mb'] = 0
+                    
+            elif self.device == "cuda":
                 stats['gpu_allocated_mb'] = torch.cuda.memory_allocated() / 1024 / 1024
                 stats['gpu_reserved_mb'] = torch.cuda.memory_reserved() / 1024 / 1024
-            except:
-                pass
+                stats['gpu_max_allocated_mb'] = torch.cuda.max_memory_allocated() / 1024 / 1024
+                stats['gpu_max_reserved_mb'] = torch.cuda.max_memory_reserved() / 1024 / 1024
+            else:
+                stats['gpu_allocated_mb'] = 0
+                
+        except Exception as e:
+            stats['gpu_allocated_mb'] = 0
+            stats['gpu_max_allocated_mb'] = 0
         
+        try:
+            # Add torch object counts for debugging
+            import gc
+            torch_objects = [obj for obj in gc.get_objects() if torch.is_tensor(obj)]
+            stats['torch_tensor_count'] = len(torch_objects)
+            
+            # Calculate total tensor memory (simplified)
+            tensor_memory_mb = 0
+            for obj in torch_objects[:100]:  # Only check first 100 to avoid performance issues
+                try:
+                    if hasattr(obj, 'numel') and hasattr(obj, 'element_size'):
+                        tensor_memory_mb += obj.numel() * obj.element_size() / 1024 / 1024
+                except:
+                    pass
+            stats['torch_tensor_memory_mb'] = tensor_memory_mb
+            
+        except Exception as e:
+            stats['torch_tensor_count'] = 0
+            stats['torch_tensor_memory_mb'] = 0
+            
         return stats
     
-    def _force_memory_cleanup(self):
+    def _detect_performance_degradation(self, current_time: float) -> bool:
+        """Detect if performance is degrading and needs more aggressive cleanup"""
+        self.performance_history.append(current_time)
+        
+        # Keep only last 15 measurements for faster detection
+        if len(self.performance_history) > 15:
+            self.performance_history = self.performance_history[-15:]
+        
+        # Need at least 6 measurements to detect trend
+        if len(self.performance_history) < 6:
+            return False
+        
+        # Check for immediate severe slowdown
+        if current_time > 12:  # Individual chunk taking >12s (lowered to catch issues earlier)
+            return True
+        
+        # Compare recent average to earlier average
+        recent_avg = sum(self.performance_history[-3:]) / 3  # Last 3 chunks
+        earlier_avg = sum(self.performance_history[:3]) / 3   # First 3 chunks
+        
+        # If recent chunks are taking 40% longer, trigger cleanup (more sensitive)
+        degradation_threshold = 1.4
+        is_degraded = recent_avg > earlier_avg * degradation_threshold
+        
+        # Also check if we have consistent slow performance
+        recent_slow_count = sum(1 for t in self.performance_history[-5:] if t > 10)  # Lowered threshold for consistency check
+        if recent_slow_count >= 3:  # 3 out of last 5 chunks are slow
+            return True
+            
+        return is_degraded
+    
+    def _clear_model_caches(self):
+        """Clear internal model caches that cause performance degradation"""
+        try:
+            # Clear T3 model KV-cache if it exists
+            if hasattr(self.model, 't3') and hasattr(self.model.t3, 'patched_model'):
+                # Clear any cached past_key_values or internal state
+                if hasattr(self.model.t3.patched_model, 'clear_cache'):
+                    self.model.t3.patched_model.clear_cache()
+                
+                # Force clear any transformer internal caches
+                if hasattr(self.model.t3.patched_model, 'tfmr'):
+                    tfmr = self.model.t3.patched_model.tfmr
+                    # Clear position embeddings cache if it exists
+                    if hasattr(tfmr, '_position_embeddings_cache'):
+                        tfmr._position_embeddings_cache.clear()
+                    # Clear any attention caches
+                    for layer in getattr(tfmr, 'layers', []):
+                        if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'past_key_value'):
+                            layer.self_attn.past_key_value = None
+            
+            # Clear S3Gen flow cache if it exists
+            if hasattr(self.model, 's3gen'):
+                s3gen = self.model.s3gen
+                # Clear conditional flow matching caches
+                if hasattr(s3gen, 'cond_cfm') and hasattr(s3gen.cond_cfm, 'flow_cache'):
+                    # Reset flow cache to empty state
+                    if hasattr(s3gen.cond_cfm, 'reset_cache'):
+                        s3gen.cond_cfm.reset_cache()
+                    elif hasattr(s3gen.cond_cfm, 'flow_cache'):
+                        # Manually clear the flow cache
+                        s3gen.cond_cfm.flow_cache = torch.zeros_like(s3gen.cond_cfm.flow_cache[:, :, :0])
+                
+                # Clear LRU resampler cache occasionally
+                if hasattr(s3gen, 'get_resampler') and hasattr(s3gen.get_resampler, 'cache_clear'):
+                    s3gen.get_resampler.cache_clear()
+            
+            # Clear any other potential caches
+            if hasattr(self.model, 'clear_caches'):
+                self.model.clear_caches()
+                
+        except Exception as e:
+            logging.warning(f"Could not clear model caches: {e}")
+    
+    def _force_memory_cleanup(self, aggressive: bool = False):
         """Force aggressive memory cleanup"""
         # Log memory before cleanup
         memory_before = self._get_memory_usage()
         
+        # Clear model-specific caches first (most important)
+        if aggressive:
+            self._clear_model_caches()
+        
         if self.device == "mps":
             torch.mps.empty_cache()
             torch.mps.synchronize()
+            if aggressive:
+                # Multiple rounds of cleanup for severe cases
+                for _ in range(3):
+                    torch.mps.empty_cache()
+                    torch.mps.synchronize()
         elif self.device == "cuda":
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+            if aggressive:
+                for _ in range(3):
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
         
         # Force garbage collection
         import gc
         gc.collect()
+        
+        if aggressive:
+            # Multiple rounds of garbage collection
+            for _ in range(3):
+                gc.collect()
         
         # Log memory after cleanup
         memory_after = self._get_memory_usage()
         rss_freed = memory_before.get('rss_mb', 0) - memory_after.get('rss_mb', 0)
         gpu_freed = memory_before.get('gpu_allocated_mb', 0) - memory_after.get('gpu_allocated_mb', 0)
         
+        cleanup_type = "aggressive" if aggressive else "standard"
         if rss_freed > 10 or gpu_freed > 10:  # Only log if significant cleanup occurred
-            logging.info(f"💾 Memory cleanup freed: {rss_freed:.1f}MB RAM, {gpu_freed:.1f}MB GPU")
+            logging.info(f"💾 {cleanup_type.title()} memory cleanup freed: {rss_freed:.1f}MB RAM, {gpu_freed:.1f}MB GPU")
+    
+    def _reinitialize_model(self):
+        """Reinitialize the TTS model as a last resort for severe performance issues"""
+        logging.warning("🔄 Reinitializing TTS model due to severe performance degradation...")
+        
+        # Clear all memory first
+        self._force_memory_cleanup(aggressive=True)
+        
+        try:
+            # Reinitialize the model
+            del self.model
+            if self.device == "mps":
+                torch.mps.empty_cache()
+                torch.mps.synchronize()
+            elif self.device == "cuda":
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
+            # Recreate model
+            self.model = ChatterboxTTS.from_pretrained(device=self.device)
+            
+            # Quick warmup
+            with torch.no_grad():
+                _ = self.model.generate("Reinit test", exaggeration=self.exaggeration, cfg_weight=self.cfg_weight)
+            
+            # Reset all counters
+            self.chunks_since_cleanup = 0
+            self.performance_history = []
+            self.severe_degradation_count = 0
+            
+            logging.info("✅ Model reinitialization completed successfully")
+            return True
+            
+        except Exception as e:
+            logging.error(f"❌ Model reinitialization failed: {e}")
+            return False
     
     def generate_chunk(self, chunk_text: str, output_file: Path) -> bool:
         """Generate audio for a single chunk with memory management"""
+        import time
+        chunk_start_time = time.time()
+        
         try:
-            # Periodic deep memory cleanup
+            # More frequent light cleanup every 3 chunks
             self.chunks_since_cleanup += 1
+            
+            # Always do light cleanup before generation
+            if self.device == "mps":
+                torch.mps.empty_cache()
+            elif self.device == "cuda":
+                torch.cuda.empty_cache()
+            
+            # Periodic deep cleanup
             if self.chunks_since_cleanup >= self.cleanup_interval:
                 logging.info(f"🧹 Performing periodic memory cleanup (every {self.cleanup_interval} chunks)")
                 self._force_memory_cleanup()
                 self.chunks_since_cleanup = 0
-            else:
-                # Light cleanup before each generation
-                if self.device == "mps":
-                    torch.mps.empty_cache()
-                elif self.device == "cuda":
-                    torch.cuda.empty_cache()
+            elif self.chunks_since_cleanup % 2 == 0:
+                # Light cleanup every 2 chunks including model cache clearing (more frequent)
+                self._clear_model_caches()
+                import gc
+                gc.collect()
+            
+            # Track memory before TTS generation
+            memory_before_tts = self._get_memory_usage()
+            tts_start_time = time.time()
             
             with torch.no_grad():
                 if self.voice_file and os.path.exists(self.voice_file):
@@ -901,6 +1100,27 @@ class AudiobookTTS:
                         cfg_weight=self.cfg_weight
                     )
             
+            tts_duration = time.time() - tts_start_time
+            memory_after_tts = self._get_memory_usage()
+            
+            # Log TTS-specific metrics for slow generations or debug mode
+            if tts_duration > 10 or self.debug_memory:  # Lowered threshold to catch more issues
+                gpu_growth = memory_after_tts.get('gpu_allocated_mb', 0) - memory_before_tts.get('gpu_allocated_mb', 0)
+                tensor_growth = memory_after_tts.get('torch_tensor_count', 0) - memory_before_tts.get('torch_tensor_count', 0)
+                
+                # Add text complexity metrics for correlation analysis
+                text_len = len(chunk_text)
+                word_count = len(chunk_text.split())
+                punct_count = sum(1 for c in chunk_text if c in '.,!?;:')
+                complexity_score = (punct_count / max(word_count, 1)) * 100  # Punctuation density as complexity proxy
+                
+                if tts_duration > 12:  # Only warn for slow generations (lowered threshold)
+                    logging.warning(f"🔍 TTS generation slow: {tts_duration:.1f}s, GPU growth: {gpu_growth:.1f}MB, Tensor growth: {tensor_growth}, Text: {text_len}chars/{word_count}words/complexity:{complexity_score:.1f}%")
+                elif tts_duration > 10:  # Info for moderately slow
+                    logging.info(f"🔍 TTS timing: {tts_duration:.1f}s, GPU growth: {gpu_growth:.1f}MB, Tensor growth: {tensor_growth}, Text: {text_len}chars/{word_count}words")
+                elif self.debug_memory:
+                    logging.info(f"🔍 TTS timing: {tts_duration:.1f}s, GPU growth: {gpu_growth:.1f}MB, Tensor growth: {tensor_growth}, Text: {text_len}chars/{word_count}words")
+            
             # Apply pitch shift if specified
             wav = self.apply_pitch_shift(wav)
             
@@ -916,13 +1136,45 @@ class AudiobookTTS:
             elif self.device == "cuda":
                 torch.cuda.empty_cache()
             
+            # Performance monitoring and adaptive cleanup
+            chunk_duration = time.time() - chunk_start_time
+            
+            # Log detailed timing breakdown for debugging
+            generation_time = chunk_duration - 0.8  # Subtract the sleep time
+            if generation_time > 12:  # Log slow generations (lowered threshold)
+                memory_after = self._get_memory_usage()
+                logging.warning(f"🐌 Slow chunk generation: {generation_time:.1f}s (GPU: {memory_after.get('gpu_allocated_mb', 0):.0f}MB, Tensors: {memory_after.get('torch_tensor_count', 0)})")
+            
+            if self.adaptive_cleanup and self._detect_performance_degradation(chunk_duration):
+                self.severe_degradation_count += 1
+                logging.warning(f"⚠️ Performance degradation detected ({self.severe_degradation_count}/{self.model_reinit_threshold})")
+                
+                if self.severe_degradation_count >= self.model_reinit_threshold:
+                    # Try model reinitialization as last resort (lowered threshold for faster recovery)
+                    logging.info(f"🔄 Triggering model reinitialization after {self.severe_degradation_count} severe degradations")
+                    if self._reinitialize_model():
+                        logging.info("✅ Model reinitialized successfully - performance should improve")
+                    else:
+                        logging.error("❌ Model reinitialization failed, continuing with aggressive cleanup")
+                        self._force_memory_cleanup(aggressive=True)
+                        self.chunks_since_cleanup = 0
+                        self.performance_history = []
+                        self.severe_degradation_count = 0
+                else:
+                    # Try aggressive cleanup first
+                    logging.info("🧹 Triggering aggressive cleanup")
+                    self._force_memory_cleanup(aggressive=True)
+                    self.chunks_since_cleanup = 0
+                    self.performance_history = []
+            
             return True
             
         except torch.mps.OutOfMemoryError as e:
             logging.error(f"MPS out of memory generating chunk: {e}")
             # Force aggressive cleanup on OOM and reset counter
-            self._force_memory_cleanup()
+            self._force_memory_cleanup(aggressive=True)
             self.chunks_since_cleanup = 0
+            self.performance_history = []  # Reset history
             return False
         except Exception as e:
             logging.error(f"Error generating chunk: {e}")
@@ -999,6 +1251,9 @@ class AudiobookTTS:
             success = self.generate_chunk(chunk_text, chunk_file)
             chunk_duration = time.time() - chunk_start_time
             
+            # Get memory stats after chunk generation
+            memory_stats = self._get_memory_usage()
+            
             if success:
                 progress.mark_chunk_completed(chunk_index)
                 try:
@@ -1006,6 +1261,23 @@ class AudiobookTTS:
                     logging.info(f"✅ Completed chunk {chunk_index:04d} ({chunk_duration:.1f}s)")
                 except Exception:
                     logging.info(f"✅ Completed chunk {chunk_index:04d} ({chunk_duration:.1f}s)")
+                
+                # Log detailed memory usage for every chunk if debug mode enabled
+                if self.debug_memory:
+                    ram_mb = memory_stats.get('rss_mb', 0)
+                    gpu_mb = memory_stats.get('gpu_allocated_mb', 0)
+                    gpu_max_mb = memory_stats.get('gpu_max_allocated_mb', 0)
+                    sys_percent = memory_stats.get('system_percent', 0)
+                    tensor_count = memory_stats.get('torch_tensor_count', 0)
+                    tensor_memory_mb = memory_stats.get('torch_tensor_memory_mb', 0)
+                    
+                    logging.info(f"💾 Chunk {chunk_index:04d} Memory: RAM={ram_mb:.0f}MB, GPU={gpu_mb:.0f}MB (max={gpu_max_mb:.0f}MB), SysRAM={sys_percent:.1f}%, Tensors={tensor_count} ({tensor_memory_mb:.0f}MB)")
+                else:
+                    # Just log basic memory stats
+                    ram_mb = memory_stats.get('rss_mb', 0)
+                    gpu_mb = memory_stats.get('gpu_allocated_mb', 0)
+                    tensor_count = memory_stats.get('torch_tensor_count', 0)
+                    logging.info(f"💾 Chunk {chunk_index:04d}: {ram_mb:.0f}MB RAM, {gpu_mb:.0f}MB GPU, {tensor_count} tensors")
             else:
                 progress.mark_chunk_failed(chunk_index)
                 logging.error(f"❌ Failed chunk {chunk_index:04d}")
@@ -1319,8 +1591,14 @@ Examples:
     parser.add_argument(
         "--memory-cleanup-interval",
         type=int,
-        default=10,
-        help="Perform deep memory cleanup every N chunks to prevent slowdown (default: 10, lower=more frequent)"
+        default=5,
+        help="Perform deep memory cleanup every N chunks to prevent slowdown (default: 5, lower=more frequent)"
+    )
+    
+    parser.add_argument(
+        "--debug-memory",
+        action="store_true",
+        help="Enable detailed memory usage logging for every chunk to debug performance issues"
     )
     
     args = parser.parse_args()
@@ -1383,7 +1661,8 @@ Examples:
             mp3_bitrate=args.mp3_bitrate,
             remove_wav=args.remove_wav,
             split_minutes=args.split_minutes,
-            memory_cleanup_interval=args.memory_cleanup_interval
+            memory_cleanup_interval=args.memory_cleanup_interval,
+            debug_memory=args.debug_memory
         )
         
         # Process audiobook
