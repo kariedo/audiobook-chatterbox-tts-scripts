@@ -1010,6 +1010,23 @@ class AudiobookTTS:
             for _ in range(3):
                 gc.collect()
         
+        # Model warmup after aggressive cleanup to reset internal state
+        if aggressive:
+            try:
+                logging.info("🔄 Performing model warmup after cleanup...")
+                with torch.no_grad():
+                    # Brief generation to reset model internal state
+                    _ = self.model.generate("Reset", exaggeration=self.exaggeration, cfg_weight=self.cfg_weight)
+                
+                # Clean up warmup artifacts
+                if self.device == "mps":
+                    torch.mps.empty_cache()
+                elif self.device == "cuda":
+                    torch.cuda.empty_cache()
+                    
+            except Exception as e:
+                logging.warning(f"Model warmup after cleanup failed: {e}")
+        
         # Log memory after cleanup
         memory_after = self._get_memory_usage()
         rss_freed = memory_before.get('rss_mb', 0) - memory_after.get('rss_mb', 0)
