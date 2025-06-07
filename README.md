@@ -1,21 +1,21 @@
 # Audiobook TTS Generator Suite
 
-A comprehensive collection of Python scripts for converting text files and ebooks into high-quality audiobooks using Chatterbox TTS. Optimized for Apple Silicon with voice cloning, pitch control, parallel processing, and automatic MP3 conversion.
+A comprehensive collection of Python scripts for converting text files and ebooks into high-quality audiobooks using Chatterbox TTS. Optimized for Apple Silicon with voice cloning, pitch control, parallel processing, automatic MP3 conversion, and time-limited file splitting.
 
 ## 🎯 Quick Start
 
 ```bash
-# Basic audiobook generation
-python audiobook_tts.py your_book.txt
+# Basic audiobook generation (creates 5-minute MP3 files by default)
+python audiobook_tts.py your_book.txt --mp3
 
-# With custom voice, pitch adjustment, and MP3 output
-python audiobook_tts.py book.epub --voice voices/narrator.wav --exaggeration 0.3 --pitch-shift +1 --mp3
+# With custom voice, pitch adjustment, and 3-minute file segments
+python audiobook_tts.py book.epub --voice voices/narrator.wav --exaggeration 0.3 --pitch-shift +1 --mp3 --split-minutes 3
 ```
 
 ## 📚 Scripts Overview
 
 ### 📖 `audiobook_tts.py` - Main Audiobook Generator
-Converts text files and ebooks into complete audiobooks with professional features and automatic MP3 conversion.
+Converts text files and ebooks into complete audiobooks with professional features, automatic MP3 conversion, and time-limited file splitting.
 
 **Features:**
 - Supports `.txt`, `.epub`, `.fb2`, `.md` files
@@ -27,14 +27,22 @@ Converts text files and ebooks into complete audiobooks with professional featur
 - Pitch and voice characteristic control
 - **🎵 Automatic MP3 conversion with FFmpeg**
 - **📱 Configurable bitrates for quality vs file size**
+- **✂️ Time-limited file splitting (5 minutes default)**
+- **📝 Proper file naming convention: `<filename>_001.mp3`, `<filename>_002.mp3`**
 - **🧹 Optional WAV file cleanup to save disk space**
 
 **Usage:**
 ```bash
-# Basic usage
-python audiobook_tts.py book.txt
+# Basic usage (creates 5-minute MP3 segments)
+python audiobook_tts.py book.txt --mp3
 
-# Advanced usage with MP3 conversion
+# Custom segment length
+python audiobook_tts.py book.txt --mp3 --split-minutes 3
+
+# Single file output (disable splitting)
+python audiobook_tts.py book.txt --mp3 --split-minutes 0
+
+# Advanced usage with custom settings
 python audiobook_tts.py novel.epub \
   --voice voices/narrator.wav \
   --limit-minutes 60 \
@@ -44,24 +52,46 @@ python audiobook_tts.py novel.epub \
   --workers 3 \
   --mp3 \
   --mp3-bitrate 192k \
+  --split-minutes 7 \
   --remove-wav
 
-# High-quality MP3 for archival
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k
+# High-quality MP3 with 10-minute segments
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k --split-minutes 10
 
-# Space-saving MP3 for mobile devices
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --remove-wav
+# Space-saving mobile version with 3-minute segments
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --split-minutes 3 --remove-wav
 ```
+
+**File Splitting Options:**
+- `--split-minutes X`: Split into X-minute files (default: 5, set to 0 to disable)
+- Creates files with naming convention: `<filename>_001.mp3`, `<filename>_002.mp3`, etc.
+- File extension is removed from base filename automatically
+- Works with both MP3 and WAV output formats
 
 **MP3 Conversion Options:**
 - `--mp3`: Enable MP3 conversion using FFmpeg
 - `--mp3-bitrate`: Choose quality (`64k`, `96k`, `128k`, `160k`, `192k`, `256k`, `320k`)
 - `--remove-wav`: Delete WAV files after MP3 conversion to save space
 
-**Output:** Creates folder `book/` with:
-- Individual chunks: `chunk_0001.wav`, `chunk_0002.wav`, etc.
-- Final audiobook: `audiobook.wav` (always created)
-- MP3 version: `audiobook.mp3` (if `--mp3` flag used)
+**Output Examples:**
+
+*With splitting enabled (default):*
+```
+book/
+├── book_001.mp3    # First 5 minutes
+├── book_002.mp3    # Next 5 minutes
+├── book_003.mp3    # Next 5 minutes
+└── ...
+```
+
+*With splitting disabled (`--split-minutes 0`):*
+```
+book/
+├── chunk_0001.wav  # Individual processing chunks
+├── chunk_0002.wav
+├── audiobook.wav   # Full combined audiobook
+└── book.mp3        # Final MP3 (if --mp3 used)
+```
 
 ---
 
@@ -106,7 +136,7 @@ python simple_epub_reader.py problematic_book.epub
 
 **Output:** Creates `book_extracted.txt` with clean text, then use:
 ```bash
-python audiobook_tts.py book_extracted.txt --mp3
+python audiobook_tts.py book_extracted.txt --mp3 --split-minutes 5
 ```
 
 ---
@@ -167,6 +197,64 @@ python voice_harvester.py --librivox-info
 - **Archive.org** - Historical recordings and speeches
 - **Your own recordings** - Always legal!
 
+---
+
+### 🌐 `html_extractor.py` - Web Content to Text Converter
+Extracts clean, readable text from web pages and local HTML files for audiobook generation.
+
+**Features:**
+- Fetch content from remote URLs or local HTML files
+- Intelligent text extraction with content filtering
+- Removes navigation, ads, and formatting elements
+- Smart text cleaning and formatting
+- Automatic filename generation
+- Robust error handling and logging
+- **🔧 Compatible with cron jobs and automation**
+- **📱 Mobile-friendly User-Agent headers**
+- **🧹 Removes scripts, styles, and non-content elements**
+
+**Usage:**
+```bash
+# Extract from web page
+python html_extractor.py https://example.com/article.html
+
+# Extract from local HTML file
+python html_extractor.py local_page.html
+
+# Custom output filename
+python html_extractor.py https://news.site.com/story.html -o story.txt
+
+# Verbose logging for debugging
+python html_extractor.py https://example.com/page.html --verbose
+```
+
+**Integration with Audiobook Generation:**
+```bash
+# Complete workflow: Web page to audiobook
+python html_extractor.py https://example.com/long-article.html -o article.txt
+python audiobook_tts.py article.txt --mp3 --split-minutes 5
+
+# Batch process multiple web pages
+for url in $(cat urls.txt); do
+    python html_extractor.py "$url"
+    python audiobook_tts.py "$(basename "$url").txt" --mp3 --split-minutes 3
+done
+```
+
+**Supported Content Sources:**
+- **News articles** - Clean extraction from news websites
+- **Blog posts** - Removes sidebars and comments
+- **Documentation** - Technical content and guides
+- **Wikipedia articles** - Clean text without navigation
+- **Local HTML files** - Offline content processing
+
+**Output Quality Features:**
+- Preserves paragraph structure and formatting
+- Removes excessive whitespace and empty lines
+- Maintains readability for TTS conversion
+- Handles various character encodings
+- Smart cleanup of HTML artifacts
+
 ## 🛠️ Installation
 
 ### Prerequisites
@@ -177,12 +265,13 @@ pip install torch torchaudio chatterbox-tts
 # Optional dependencies for enhanced features
 pip install ebooklib beautifulsoup4  # Better EPUB support
 pip install sounddevice              # For voice recording
+pip install requests                 # For web content extraction
 
-# Required for MP3 conversion
-# Install FFmpeg (required for --mp3 flag)
+# Required for MP3 conversion and file splitting
+# Install FFmpeg (required for --mp3 flag and --split-minutes)
 ```
 
-### FFmpeg Installation for MP3 Conversion
+### FFmpeg Installation for MP3 Conversion and File Splitting
 
 **macOS (using Homebrew):**
 ```bash
@@ -212,8 +301,12 @@ The scripts are optimized for M4 Macs with automatic MPS (Metal Performance Shad
 
 ## 🔄 Typical Workflow
 
-1. **Test EPUB extraction** (if using EPUB files):
+1. **Extract or download source content**:
    ```bash
+   # From web page
+   python html_extractor.py https://example.com/article.html -o article.txt
+   
+   # Test EPUB extraction (if using EPUB files)
    python epub_preview.py book.epub --extract
    ```
 
@@ -222,30 +315,33 @@ The scripts are optimized for M4 Macs with automatic MPS (Metal Performance Shad
    python voice_pitch_tuner.py --interactive
    ```
 
-3. **Generate audiobook with MP3 conversion**:
+3. **Generate audiobook with MP3 conversion and splitting**:
    ```bash
-   python audiobook_tts.py book.epub --exaggeration 0.3 --cfg-weight 0.4 --mp3 --mp3-bitrate 160k
+   python audiobook_tts.py book.epub --exaggeration 0.3 --cfg-weight 0.4 --mp3 --mp3-bitrate 160k --split-minutes 5
    ```
 
 4. **If interrupted, resume**:
    ```bash
-   python audiobook_tts.py book.epub --mp3  # Automatically resumes and converts to MP3
+   python audiobook_tts.py book.epub --mp3 --split-minutes 5  # Automatically resumes and applies splitting
    ```
 
 ## 📁 Directory Structure
 
-After running scripts, you'll have:
+After running scripts with file splitting enabled, you'll have:
 ```
 your_project/
-├── book/                    # Audiobook output
-│   ├── chunk_0001.wav      # Individual segments
+├── book/                      # Audiobook output directory
+│   ├── chunk_0001.wav        # Individual processing segments
 │   ├── chunk_0002.wav
-│   ├── progress.json       # Resume data
-│   ├── audiobook.wav       # Final combined book (WAV)
-│   └── audiobook.mp3       # Final combined book (MP3, if --mp3 used)
-├── pitch_tests/            # Voice tuning samples
-├── voice_library/          # Extracted voice samples
-└── extracted_voices/       # Harvested voice segments
+│   ├── progress.json         # Resume data
+│   ├── audiobook.wav         # Temporary combined file (removed if --remove-wav)
+│   ├── book_001.mp3          # Final split files (5 min each)
+│   ├── book_002.mp3          # Second segment
+│   ├── book_003.mp3          # Third segment
+│   └── book_004.mp3          # Final segment
+├── pitch_tests/              # Voice tuning samples
+├── voice_library/            # Extracted voice samples
+└── extracted_voices/         # Harvested voice segments
 ```
 
 ## ⚡ Performance Tips
@@ -255,9 +351,22 @@ your_project/
 - **Optimal Chunk Size:** Default 200 characters works best
 - **Memory Management:** Scripts automatically clear GPU cache
 - **Resume Feature:** Large books can be processed in sessions with `--limit-minutes`
-- **MP3 Conversion:** Happens automatically after WAV generation completes
+- **File Splitting:** Happens automatically after audio generation completes
+- **MP3 Conversion:** Optimized for speech content with minimal processing overhead
 
-## 🎵 MP3 Quality Guidelines
+## 🎵 File Splitting and MP3 Quality Guidelines
+
+**File Splitting Benefits:**
+- **Easier navigation:** Jump to specific chapters or sections
+- **Better compatibility:** Some devices have file size limits
+- **Convenient sharing:** Share specific portions without splitting manually
+- **Resume listening:** Easier to remember where you left off
+
+**Recommended Split Durations:**
+- **3-5 minutes:** Optimal for mobile listening and navigation
+- **10-15 minutes:** Good for longer listening sessions
+- **20+ minutes:** Chapter-like segments for books
+- **0 (disabled):** Single file for simple playback
 
 **Bitrate Recommendations:**
 - **64k-96k:** Mobile devices, very small files, basic quality
@@ -265,11 +374,11 @@ your_project/
 - **160k-192k:** High quality, good balance of size vs quality
 - **256k-320k:** Excellent quality, larger files, archival purposes
 
-**File Size Comparison (1-hour audiobook):**
-- WAV (original): ~600MB
-- MP3 128k: ~60MB (90% smaller)
-- MP3 192k: ~90MB (85% smaller)
-- MP3 320k: ~150MB (75% smaller)
+**File Size Comparison (5-minute segment):**
+- WAV (original): ~50MB per segment
+- MP3 128k: ~5MB per segment (90% smaller)
+- MP3 192k: ~7.5MB per segment (85% smaller)
+- MP3 320k: ~12.5MB per segment (75% smaller)
 
 **Audio Optimization for Speech:**
 - Sample rate: 22kHz (perfect for speech)
@@ -292,6 +401,12 @@ your_project/
 
 ## 🆘 Troubleshooting
 
+**Web Content Issues:**
+- Use `html_extractor.py` for web pages and HTML files
+- Supports both remote URLs and local HTML files
+- Handles various website layouts and content structures
+- Check output text quality before audiobook generation
+
 **EPUB Issues:**
 - Try `epub_preview.py` first to debug extraction
 - Use `simple_epub_reader.py` for problematic files
@@ -302,22 +417,42 @@ your_project/
 - Test with short samples before full books
 - Check voice sample quality with `voice_harvester.py`
 
-**MP3 Conversion Issues:**
+**MP3 Conversion and File Splitting Issues:**
 - Ensure FFmpeg is installed: `ffmpeg -version`
 - Check FFmpeg installation guide above
-- MP3 conversion automatically disabled if FFmpeg not found
+- Both MP3 conversion and file splitting automatically disabled if FFmpeg not found
+- Use `--split-minutes 0` to disable splitting if only MP3 conversion is needed
 - Use `--mp3-bitrate` to adjust quality vs file size
+
+**File Splitting Issues:**
+- Large files may take longer to split - this is normal
+- If splitting fails, original combined file is preserved
+- Use `--remove-wav` carefully - only removes files after successful conversion
+- Check disk space before processing large books with splitting enabled
 
 **Performance:**
 - Ensure you're using MPS acceleration (shows in logs)
 - Reduce `--workers` if experiencing memory issues
 - Use `--limit-minutes` for very large books
-- MP3 conversion adds minimal processing time
+- File splitting adds minimal processing time after audio generation
 
 ## 📋 Examples
 
+### Complete Workflow Examples
+
 ```bash
-# Complete workflow with custom voice and MP3
+# Web article to audiobook with custom voice and splitting
+python html_extractor.py https://example.com/long-article.html -o article.txt
+python voice_pitch_tuner.py --voice voices/narrator.wav --interactive
+python audiobook_tts.py article.txt \
+  --voice voices/narrator.wav \
+  --exaggeration 0.4 \
+  --mp3 \
+  --mp3-bitrate 160k \
+  --split-minutes 5 \
+  --remove-wav
+
+# Complete workflow with custom voice, MP3, and 3-minute segments
 python voice_harvester.py --extract narrator_audiobook.mp3
 python voice_pitch_tuner.py --voice extracted_voices/voice_segment_003.wav --interactive
 python audiobook_tts.py novel.epub \
@@ -325,47 +460,115 @@ python audiobook_tts.py novel.epub \
   --exaggeration 0.4 \
   --mp3 \
   --mp3-bitrate 160k \
+  --split-minutes 3 \
   --remove-wav
 
-# Quick audiobook with pitch adjustment and MP3
-python audiobook_tts.py book.txt --pitch-shift -1 --limit-minutes 30 --mp3
+# Quick audiobook with pitch adjustment and 5-minute MP3 segments
+python audiobook_tts.py book.txt --pitch-shift -1 --limit-minutes 30 --mp3 --split-minutes 5
 
-# High-quality archival version
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k
+# High-quality archival version with 15-minute segments
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k --split-minutes 15
 
-# Mobile-optimized version with cleanup
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --remove-wav
+# Mobile-optimized version with 3-minute segments and cleanup
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --split-minutes 3 --remove-wav
 
-# Debug problematic EPUB with MP3 output
+# Single file output (no splitting)
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 192k --split-minutes 0
+
+# Debug problematic EPUB with MP3 output and splitting
 python epub_preview.py problematic.epub --save clean_text.txt
-python audiobook_tts.py clean_text.txt --mp3 --mp3-bitrate 128k
+python audiobook_tts.py clean_text.txt --mp3 --mp3-bitrate 128k --split-minutes 5
+
+# Web content extraction and processing
+python html_extractor.py https://news.example.com/article.html --verbose
+python audiobook_tts.py news_example_com_article.txt --mp3 --split-minutes 3
 ```
 
-## 🎛️ Advanced MP3 Options
+### File Splitting Scenarios
 
-**Space-Saving Workflow:**
 ```bash
-# Generate with immediate cleanup
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 128k --remove-wav
-# Result: Only MP3 files remain, maximum disk space savings
+# Podcast-style short segments (3 minutes)
+python audiobook_tts.py book.txt --mp3 --split-minutes 3
+
+# Chapter-like segments (20 minutes)
+python audiobook_tts.py book.txt --mp3 --split-minutes 20
+
+# Traditional audiobook segments (10 minutes)
+python audiobook_tts.py book.txt --mp3 --split-minutes 10
+
+# Maximum compatibility (5 minutes, lower bitrate)
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --split-minutes 5
 ```
 
-**Quality Comparison Workflow:**
+### Space-Saving Workflows
+
 ```bash
-# Generate multiple quality versions
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 128k
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 192k
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k
-# Compare file sizes and audio quality
+# Generate with immediate cleanup and splitting
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 128k --split-minutes 5 --remove-wav
+# Result: Only numbered MP3 files remain (book_001.mp3, book_002.mp3, etc.)
+
+# Compare file splitting approaches
+python audiobook_tts.py book.txt --mp3 --split-minutes 3   # Many small files
+python audiobook_tts.py book.txt --mp3 --split-minutes 15  # Fewer large files
+python audiobook_tts.py book.txt --mp3 --split-minutes 0   # Single file
 ```
 
-**Batch Processing with MP3:**
+### Batch Processing with File Splitting
+
 ```bash
-# Process multiple books with consistent settings
+# Process multiple books with consistent 5-minute splitting
 for book in *.epub; do
-    python audiobook_tts.py "$book" --mp3 --mp3-bitrate 160k --remove-wav
+    python audiobook_tts.py "$book" --mp3 --mp3-bitrate 160k --split-minutes 5 --remove-wav
 done
+
+# Batch process web articles
+while IFS= read -r url; do
+    python html_extractor.py "$url"
+    filename=$(python -c "from html_extractor import HTMLTextExtractor; print(HTMLTextExtractor().generate_output_filename('$url'))")
+    python audiobook_tts.py "$filename" --mp3 --mp3-bitrate 128k --split-minutes 3
+done < urls.txt
+
+# Create different versions for different use cases
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --split-minutes 3    # Mobile
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 192k --split-minutes 10  # Desktop
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k --split-minutes 0   # Archive
 ```
+
+## 🎛️ Advanced File Management
+
+**Naming Convention Benefits:**
+- Files are automatically named: `<filename>_001.mp3`, `<filename>_002.mp3`
+- File extension is removed from base name (e.g., `book.txt` becomes `book_001.mp3`)
+- Sequential numbering ensures proper playlist order
+- Compatible with most media players and podcast apps
+
+**File Organization Tips:**
+```bash
+# Output structure for "My Novel.epub" with 5-minute segments:
+My Novel/
+├── My Novel_001.mp3  # Minutes 0-5
+├── My Novel_002.mp3  # Minutes 5-10
+├── My Novel_003.mp3  # Minutes 10-15
+└── ...
+
+# Use descriptive folder organization:
+mkdir -p "Audiobooks/$(basename "$book" .epub)"
+python audiobook_tts.py "$book" --mp3 --split-minutes 5
+```
+
+## 🎯 Voice Quality Guidelines
+
+**For Best Results:**
+- Use 5-15 second voice samples
+- Choose clear, single-speaker audio
+- Avoid background music or noise
+- Test voice settings with short samples first
+
+**Parameter Optimization:**
+- Start with interactive tuner to find your preferred sound
+- Lower `exaggeration` values = higher, lighter voices
+- Lower `cfg_weight` values = more expressive, variable voices
+- Use `pitch_shift` for fine-tuning after generation
 
 ## ⚖️ Legal Notice
 
@@ -375,6 +578,13 @@ Only use voice samples from:
 - ✅ Content you have permission to use
 - ❌ Avoid copyrighted material without permission
 
+**Web Content Usage:**
+- ✅ Public domain articles and documentation
+- ✅ Content you own or have permission to use
+- ✅ Fair use educational content (check local laws)
+- ❌ Copyrighted articles without permission
+- ❌ Paywalled content circumvention
+
 ---
 
-*Optimized for Apple Silicon Macs with Chatterbox TTS and FFmpeg MP3 conversion*
+*Optimized for Apple Silicon Macs with Chatterbox TTS, FFmpeg MP3 conversion, intelligent file splitting*

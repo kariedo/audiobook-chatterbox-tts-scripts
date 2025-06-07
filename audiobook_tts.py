@@ -2,7 +2,7 @@
 """
 Audiobook TTS Generator
 Converts text files and ebooks to audiobooks using Chatterbox TTS
-Supports chunking, parallel processing, resume capability, voice cloning, and MP3 conversion
+Supports chunking, parallel processing, resume capability, voice cloning, MP3 conversion, and time-limited file splitting
 """
 
 import argparse
@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 import hashlib
+import math
 
 import torch
 import torchaudio as ta
@@ -168,6 +169,103 @@ class AudioConverter:
         except Exception as e:
             logging.warning(f"Could not get audio info: {e}")
             return {}
+
+class AudioSplitter:
+    """Handles splitting audio files into time-limited segments"""
+    
+    @staticmethod
+    def split_audio_by_time(input_file: Path, output_base_name: str, max_minutes: int = 5, 
+                           mp3_enabled: bool = False, mp3_bitrate: str = "128k", 
+                           remove_wav: bool = False) -> List[Path]:
+        """Split audio file into time-limited segments"""
+        
+        if not AudioConverter.check_ffmpeg_available():
+            logging.error("❌ FFmpeg not found! Cannot split audio files")
+            return []
+        
+        try:
+            # Get audio duration first
+            audio_info = AudioConverter.get_audio_info(input_file)
+            total_duration = audio_info.get('duration', 0)
+            
+            if total_duration == 0:
+                logging.error("❌ Could not determine audio duration")
+                return []
+            
+            max_seconds = max_minutes * 60
+            num_segments = math.ceil(total_duration / max_seconds)
+            
+            logging.info(f"🔄 Splitting audio into {num_segments} segments of max {max_minutes} minutes each...")
+            
+            output_files = []
+            
+            for i in range(num_segments):
+                start_time = i * max_seconds
+                segment_num = f"{i+1:03d}"
+                
+                # Determine output format and filename
+                if mp3_enabled:
+                    output_file = input_file.parent / f"{output_base_name}_{segment_num}.mp3"
+                    codec_args = ['-codec:a', 'libmp3lame', '-b:a', mp3_bitrate]
+                else:
+                    output_file = input_file.parent / f"{output_base_name}_{segment_num}.wav"
+                    codec_args = ['-codec:a', 'pcm_s16le']
+                
+                # FFmpeg command to extract segment
+                cmd = [
+                    'ffmpeg',
+                    '-i', str(input_file),
+                    '-ss', str(start_time),      # Start time
+                    '-t', str(max_seconds),      # Duration
+                    '-ar', '22050',              # Sample rate
+                    '-ac', '1',                  # Mono
+                    *codec_args,                 # Codec specific args
+                    '-y',                        # Overwrite
+                    str(output_file)
+                ]
+                
+                logging.info(f"📁 Creating segment {segment_num}: {start_time//60:02d}:{start_time%60:02d} - {(start_time+max_seconds)//60:02d}:{(start_time+max_seconds)%60:02d}")
+                
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                
+                if result.returncode == 0 and output_file.exists():
+                    # Verify the file has content
+                    if output_file.stat().st_size > 1024:  # At least 1KB
+                        output_files.append(output_file)
+                        
+                        # Get segment info
+                        segment_info = AudioConverter.get_audio_info(output_file)
+                        segment_duration = segment_info.get('duration', 0)
+                        
+                        logging.info(f"✅ Segment {segment_num} created: {segment_duration:.1f}s, {output_file.stat().st_size//1024//1024}MB")
+                    else:
+                        logging.warning(f"⚠️ Segment {segment_num} is too small, skipping")
+                        if output_file.exists():
+                            output_file.unlink()
+                else:
+                    logging.error(f"❌ Failed to create segment {segment_num}")
+                    logging.error(f"   stderr: {result.stderr}")
+            
+            # Remove original file if requested and segments were created successfully
+            if remove_wav and output_files and input_file.suffix.lower() == '.wav':
+                try:
+                    input_file.unlink()
+                    logging.info(f"🗑️ Removed original file: {input_file.name}")
+                except Exception as e:
+                    logging.warning(f"Could not remove original file: {e}")
+            
+            logging.info(f"🎵 Audio splitting complete: {len(output_files)} segments created")
+            
+            return output_files
+            
+        except Exception as e:
+            logging.error(f"❌ Audio splitting error: {e}")
+            return []
 
 class TextProcessor:
     """Handles different text file formats"""
@@ -542,7 +640,8 @@ class AudiobookTTS:
     
     def __init__(self, voice_file: Optional[str] = None, max_workers: int = 2, 
                  exaggeration: float = 0.8, cfg_weight: float = 0.8, pitch_shift: float = 0.0,
-                 mp3_bitrate: str = "128k", mp3_enabled: bool = False, remove_wav: bool = False):
+                 mp3_bitrate: str = "128k", mp3_enabled: bool = False, remove_wav: bool = False,
+                 split_minutes: int = 5):
         self.device = setup_mac_compatibility()
         logging.info(f"Initializing Chatterbox TTS on {self.device}...")
         
@@ -560,13 +659,23 @@ class AudiobookTTS:
         self.mp3_bitrate = mp3_bitrate
         self.remove_wav = remove_wav
         
-        # Check FFmpeg availability if MP3 is enabled
-        if self.mp3_enabled:
+        # File splitting settings
+        self.split_minutes = split_minutes
+        
+        # Check FFmpeg availability if MP3 is enabled or splitting is requested
+        if self.mp3_enabled or self.split_minutes > 0:
             if not AudioConverter.check_ffmpeg_available():
-                logging.warning("⚠️ FFmpeg not found - MP3 conversion will be disabled")
-                self.mp3_enabled = False
+                if self.mp3_enabled:
+                    logging.warning("⚠️ FFmpeg not found - MP3 conversion will be disabled")
+                    self.mp3_enabled = False
+                if self.split_minutes > 0:
+                    logging.warning("⚠️ FFmpeg not found - File splitting will be disabled")
+                    self.split_minutes = 0
             else:
-                logging.info(f"🎵 MP3 conversion enabled (bitrate: {mp3_bitrate})")
+                if self.mp3_enabled:
+                    logging.info(f"🎵 MP3 conversion enabled (bitrate: {mp3_bitrate})")
+                if self.split_minutes > 0:
+                    logging.info(f"✂️ File splitting enabled (max {split_minutes} minutes per file)")
         
         # Warmup
         with torch.no_grad():
@@ -679,7 +788,7 @@ class AudiobookTTS:
         
         if not chunks_to_process:
             logging.info("🎉 All chunks already completed!")
-            return self._combine_chunks(output_dir, len(chunks))
+            return self._combine_chunks(output_dir, len(chunks), input_file.stem)
         
         logging.info(f"🚀 Processing {len(chunks_to_process)} remaining chunks...")
         
@@ -759,12 +868,12 @@ class AudiobookTTS:
         
         # Combine completed chunks
         if total_completed > 0:
-            return self._combine_chunks(output_dir, len(chunks))
+            return self._combine_chunks(output_dir, len(chunks), input_file.stem)
         else:
             logging.error("No chunks were successfully generated!")
             return output_dir
     
-    def _combine_chunks(self, output_dir: Path, total_chunks: int) -> Path:
+    def _combine_chunks(self, output_dir: Path, total_chunks: int, base_filename: str) -> Path:
         """Combine individual chunk files into final audiobook"""
         
         logging.info("🔗 Combining chunks into final audiobook...")
@@ -814,9 +923,40 @@ class AudiobookTTS:
         logging.info(f"   Duration: {hours:02d}:{minutes:02d}:{seconds:02d}")
         logging.info(f"   Chunks used: {len(audio_segments)}/{total_chunks}")
         
-        # Convert to MP3 if enabled
-        if self.mp3_enabled:
-            final_mp3_file = output_dir / "audiobook.mp3"
+        # Handle file splitting and MP3 conversion
+        final_output_files = []
+        
+        if self.split_minutes > 0:
+            # Split the combined audiobook into time-limited files
+            logging.info(f"✂️ Splitting audiobook into {self.split_minutes}-minute segments...")
+            
+            split_files = AudioSplitter.split_audio_by_time(
+                input_file=final_wav_file,
+                output_base_name=base_filename,
+                max_minutes=self.split_minutes,
+                mp3_enabled=self.mp3_enabled,
+                mp3_bitrate=self.mp3_bitrate,
+                remove_wav=self.remove_wav
+            )
+            
+            if split_files:
+                final_output_files = split_files
+                logging.info(f"📱 Split audiobook into {len(split_files)} files")
+                
+                # Remove the combined file if split was successful and we're keeping MP3 only
+                if self.remove_wav and self.mp3_enabled:
+                    try:
+                        final_wav_file.unlink()
+                        logging.info(f"🗑️ Removed combined WAV file: {final_wav_file.name}")
+                    except Exception as e:
+                        logging.warning(f"Could not remove combined WAV file: {e}")
+            else:
+                logging.warning("⚠️ File splitting failed, keeping combined file")
+                final_output_files = [final_wav_file]
+        
+        elif self.mp3_enabled:
+            # Convert to MP3 without splitting
+            final_mp3_file = output_dir / f"{base_filename}.mp3"
             logging.info("🔄 Converting final audiobook to MP3...")
             
             conversion_success = AudioConverter.convert_to_mp3(
@@ -827,6 +967,8 @@ class AudiobookTTS:
             )
             
             if conversion_success:
+                final_output_files = [final_mp3_file]
+                
                 # Get audio info for the MP3
                 mp3_info = AudioConverter.get_audio_info(final_mp3_file)
                 if mp3_info:
@@ -835,10 +977,24 @@ class AudiobookTTS:
                     logging.info(f"   Size: {mp3_info.get('size', 0) // 1024 // 1024}MB")
                     logging.info(f"   Bitrate: {mp3_info.get('bitrate', 0) // 1000}kbps")
                     logging.info(f"   Format: {mp3_info.get('codec', 'mp3')}")
-                
-                # Clean up individual chunk files if requested
-                if self.remove_wav:
-                    self._cleanup_chunk_files(output_dir, total_chunks)
+            else:
+                final_output_files = [final_wav_file]
+        else:
+            # Keep WAV file as is
+            final_output_files = [final_wav_file]
+        
+        # Clean up individual chunk files if requested
+        if self.remove_wav and (self.mp3_enabled or self.split_minutes > 0):
+            self._cleanup_chunk_files(output_dir, total_chunks)
+        
+        # Log final output files
+        if final_output_files:
+            logging.info("📋 Final output files:")
+            for output_file in final_output_files:
+                file_info = AudioConverter.get_audio_info(output_file)
+                duration = file_info.get('duration', 0)
+                size_mb = output_file.stat().st_size // 1024 // 1024
+                logging.info(f"   📄 {output_file.name} - {duration//60:.0f}:{duration%60:02.0f} ({size_mb}MB)")
         
         return output_dir
     
@@ -871,7 +1027,8 @@ Examples:
   python audiobook_tts.py novel.fb2 --voice voices/narrator.wav
   python audiobook_tts.py story.epub --limit-minutes 30 --mp3
   python audiobook_tts.py document.txt --voice voices/reader.wav --mp3 --mp3-bitrate 192k
-  python audiobook_tts.py book.txt --mp3 --remove-wav --mp3-bitrate 256k
+  python audiobook_tts.py book.txt --mp3 --remove-wav --mp3-bitrate 256k --split-minutes 10
+  python audiobook_tts.py novel.txt --split-minutes 3 --mp3
         """
     )
     
@@ -940,6 +1097,14 @@ Examples:
         help="Remove WAV files after MP3 conversion (saves disk space)"
     )
     
+    # File splitting arguments
+    parser.add_argument(
+        "--split-minutes",
+        type=int,
+        default=5,
+        help="Split output into files of maximum X minutes each (default: 5, set to 0 to disable)"
+    )
+    
     args = parser.parse_args()
     
     # Validate input file
@@ -954,9 +1119,14 @@ Examples:
         sys.exit(1)
     
     # Validate MP3 settings
-    if args.remove_wav and not args.mp3:
-        logging.warning("--remove-wav specified without --mp3, ignoring...")
+    if args.remove_wav and not args.mp3 and args.split_minutes == 0:
+        logging.warning("--remove-wav specified without --mp3 or --split-minutes, ignoring...")
         args.remove_wav = False
+    
+    # Validate split settings
+    if args.split_minutes < 0:
+        logging.error("--split-minutes must be 0 or positive")
+        sys.exit(1)
     
     # Log configuration
     logging.info("🎙️ Audiobook TTS Generator Starting...")
@@ -967,11 +1137,21 @@ Examples:
     logging.info(f"   Time limit: {args.limit_minutes or 'None'} minutes")
     logging.info(f"   Workers: {args.workers}")
     
-    if args.mp3:
+    if args.split_minutes > 0:
+        logging.info(f"   File splitting: enabled (max {args.split_minutes} minutes per file)")
+        output_format = "MP3" if args.mp3 else "WAV"
+        logging.info(f"   Output format: {output_format}")
+        if args.mp3:
+            logging.info(f"   MP3 bitrate: {args.mp3_bitrate}")
+    elif args.mp3:
         logging.info(f"   MP3 conversion: enabled (bitrate: {args.mp3_bitrate})")
-        logging.info(f"   Remove WAV files: {args.remove_wav}")
+        logging.info(f"   File splitting: disabled")
     else:
         logging.info("   MP3 conversion: disabled")
+        logging.info("   File splitting: disabled")
+    
+    if args.remove_wav:
+        logging.info(f"   Remove WAV files: {args.remove_wav}")
     
     try:
         # Initialize TTS generator
@@ -983,7 +1163,8 @@ Examples:
             pitch_shift=args.pitch_shift,
             mp3_enabled=args.mp3,
             mp3_bitrate=args.mp3_bitrate,
-            remove_wav=args.remove_wav
+            remove_wav=args.remove_wav,
+            split_minutes=args.split_minutes
         )
         
         # Process audiobook
@@ -996,13 +1177,25 @@ Examples:
         
         # List final output files
         final_files = []
-        wav_file = output_dir / "audiobook.wav"
-        mp3_file = output_dir / "audiobook.mp3"
         
-        if wav_file.exists():
-            final_files.append(f"📄 WAV: {wav_file}")
-        if mp3_file.exists():
-            final_files.append(f"🎵 MP3: {mp3_file}")
+        # Look for split files or single files
+        if args.split_minutes > 0:
+            # Look for split files with the new naming convention
+            base_name = input_file.stem
+            extension = ".mp3" if args.mp3 else ".wav"
+            
+            split_files = sorted(output_dir.glob(f"{base_name}_*.{extension.lstrip('.')}"))
+            for split_file in split_files:
+                final_files.append(f"🎵 {split_file.name}")
+        else:
+            # Look for single combined files
+            wav_file = output_dir / "audiobook.wav"
+            mp3_file = output_dir / f"{input_file.stem}.mp3"
+            
+            if mp3_file.exists():
+                final_files.append(f"🎵 {mp3_file.name}")
+            elif wav_file.exists():
+                final_files.append(f"📄 {wav_file.name}")
         
         if final_files:
             logging.info("📋 Final output files:")
