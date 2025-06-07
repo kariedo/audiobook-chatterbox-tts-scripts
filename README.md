@@ -30,6 +30,9 @@ Converts text files and ebooks into complete audiobooks with professional featur
 - **✂️ Time-limited file splitting (5 minutes default)**
 - **📝 Proper file naming convention: `<filename>_001.mp3`, `<filename>_002.mp3`**
 - **🧹 Optional WAV file cleanup to save disk space**
+- **⏱️ Real-time ETA calculation and progress percentage**
+- **🧠 Optimized memory management for Apple Silicon**
+- **🔕 Clean output with suppressed dependency warnings**
 
 **Usage:**
 ```bash
@@ -297,7 +300,7 @@ ffmpeg -version  # Should show FFmpeg version info
 ```
 
 ### Apple Silicon (M4 Mac) Setup
-The scripts are optimized for M4 Macs with automatic MPS (Metal Performance Shaders) acceleration.
+The scripts are optimized for M4 Macs with automatic MPS (Metal Performance Shaders) acceleration, aggressive memory management, and intelligent worker allocation to prevent out-of-memory crashes.
 
 ## 🔄 Typical Workflow
 
@@ -346,13 +349,15 @@ your_project/
 
 ## ⚡ Performance Tips
 
-- **M4 Mac:** Uses MPS acceleration automatically
-- **Parallel Processing:** Use `--workers 2-4` for faster generation
+- **M4 Mac:** Uses MPS acceleration automatically with optimized memory management
+- **Parallel Processing:** Uses 1 worker for MPS devices, 2-4 workers for other systems
 - **Optimal Chunk Size:** Default 200 characters works best
-- **Memory Management:** Scripts automatically clear GPU cache
+- **Memory Management:** Aggressive GPU cache clearing and memory synchronization
 - **Resume Feature:** Large books can be processed in sessions with `--limit-minutes`
 - **File Splitting:** Happens automatically after audio generation completes
 - **MP3 Conversion:** Optimized for speech content with minimal processing overhead
+- **Progress Tracking:** Real-time ETA and completion percentage display
+- **Clean Output:** Dependency warnings automatically suppressed for cleaner logs
 
 ## 🎵 File Splitting and MP3 Quality Guidelines
 
@@ -384,6 +389,29 @@ your_project/
 - Sample rate: 22kHz (perfect for speech)
 - Channels: Mono (smaller files, adequate for audiobooks)
 - Compression: Optimized for speech content
+
+## 📊 Progress Tracking and ETA
+
+The audiobook generator now provides detailed progress information during generation:
+
+**Real-time Progress Display:**
+```
+📊 Progress: 966/2103 (45.9%) completed, 0 failed
+⏱️ ETA: 1h 47m (Rate: 2.1 chunks/sec)
+```
+
+**Progress Features:**
+- **Completion Percentage:** Shows exact progress through the book
+- **ETA Calculation:** Estimates time to completion based on current speed
+- **Processing Rate:** Displays chunks processed per second
+- **Failed Chunk Tracking:** Monitors and reports any processing failures
+- **Session Resumption:** Maintains progress across interrupted sessions
+
+**ETA Accuracy:**
+- Calculates from actual processing speed over the last 50 chunks
+- Updates in real-time as processing speed changes
+- Accounts for system performance variations
+- More accurate for longer processing sessions
 
 ## 🎯 Voice Quality Guidelines
 
@@ -432,9 +460,12 @@ your_project/
 
 **Performance:**
 - Ensure you're using MPS acceleration (shows in logs)
-- Reduce `--workers` if experiencing memory issues
+- Memory management is automatic for Apple Silicon Macs
+- Worker count is automatically optimized (1 for MPS, 2-4 for others)
 - Use `--limit-minutes` for very large books
 - File splitting adds minimal processing time after audio generation
+- ETA calculation provides accurate completion estimates
+- Progress percentage shows real-time completion status
 
 ## 📋 Examples
 
