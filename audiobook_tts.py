@@ -645,9 +645,16 @@ class AudiobookTTS:
         self.device = setup_mac_compatibility()
         logging.info(f"Initializing Chatterbox TTS on {self.device}...")
         
+        # Set MPS memory allocation strategy for better memory management
+        if self.device == "mps":
+            os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'
+            # Force immediate cleanup
+            torch.mps.empty_cache()
+        
         self.model = ChatterboxTTS.from_pretrained(device=self.device)
         self.voice_file = voice_file
-        self.max_workers = max_workers
+        # Reduce default workers for MPS to prevent OOM
+        self.max_workers = 1 if self.device == "mps" else max_workers
         
         # Voice characteristics settings
         self.exaggeration = exaggeration
@@ -712,8 +719,16 @@ class AudiobookTTS:
             return wav
     
     def generate_chunk(self, chunk_text: str, output_file: Path) -> bool:
-        """Generate audio for a single chunk"""
+        """Generate audio for a single chunk with memory management"""
         try:
+            # Aggressive memory cleanup before generation
+            if self.device == "mps":
+                torch.mps.empty_cache()
+                torch.mps.synchronize()
+            elif self.device == "cuda":
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
             with torch.no_grad():
                 if self.voice_file and os.path.exists(self.voice_file):
                     wav = self.model.generate(
@@ -735,15 +750,26 @@ class AudiobookTTS:
             # Save audio
             ta.save(str(output_file), wav, self.model.sr)
             
-            # Clear GPU memory
-            if self.device in ["mps", "cuda"]:
-                if self.device == "mps":
-                    torch.mps.empty_cache()
-                else:
-                    torch.cuda.empty_cache()
+            # Immediate cleanup
+            del wav
+            
+            # Aggressive GPU memory cleanup after generation
+            if self.device == "mps":
+                torch.mps.empty_cache()
+                torch.mps.synchronize()
+            elif self.device == "cuda":
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
             
             return True
             
+        except torch.mps.OutOfMemoryError as e:
+            logging.error(f"MPS out of memory generating chunk: {e}")
+            # Aggressive cleanup on OOM
+            if self.device == "mps":
+                torch.mps.empty_cache()
+                torch.mps.synchronize()
+            return False
         except Exception as e:
             logging.error(f"Error generating chunk: {e}")
             return False
@@ -806,20 +832,31 @@ class AudiobookTTS:
             
             logging.info(f"🎵 Generating chunk {chunk_index:04d}: {chunk_text[:50]}...")
             
+            # Add delay between chunks for memory recovery
+            import time
+            time.sleep(0.5)
+            
             success = self.generate_chunk(chunk_text, chunk_file)
             
             if success:
                 progress.mark_chunk_completed(chunk_index)
-                audio_length = ta.info(str(chunk_file)).num_frames / ta.info(str(chunk_file)).sample_rate
-                logging.info(f"✅ Completed chunk {chunk_index:04d} ({audio_length:.1f}s)")
+                try:
+                    audio_length = ta.info(str(chunk_file)).num_frames / ta.info(str(chunk_file)).sample_rate
+                    logging.info(f"✅ Completed chunk {chunk_index:04d} ({audio_length:.1f}s)")
+                except Exception:
+                    logging.info(f"✅ Completed chunk {chunk_index:04d}")
             else:
                 progress.mark_chunk_failed(chunk_index)
                 logging.error(f"❌ Failed chunk {chunk_index:04d}")
             
             return success
         
+        # Reduce workers to prevent memory exhaustion
+        safe_workers = min(self.max_workers, 1 if self.device == "mps" else 2)
+        logging.info(f"🔧 Using {safe_workers} workers for memory safety")
+        
         # Use ThreadPoolExecutor for parallel processing
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=safe_workers) as executor:
             # Submit all chunks
             future_to_chunk = {
                 executor.submit(process_single_chunk, chunk_data): chunk_data[0] 
