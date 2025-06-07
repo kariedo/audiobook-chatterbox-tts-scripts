@@ -670,36 +670,44 @@ class ProgressTracker:
         completed = len(self.progress["completed_chunks"])
         total = self.progress["total_chunks"]
         
-        if completed == 0 or not self.progress.get("session_start_time"):
+        if completed == 0:
             return "Calculating...", 0.0
         
-        # Calculate time elapsed since session start
-        session_start = datetime.fromisoformat(self.progress["session_start_time"])
-        elapsed_seconds = (datetime.now() - session_start).total_seconds()
-        
-        if elapsed_seconds <= 0:
+        # Use the last few chunks to calculate rate
+        if "chunk_times" not in self.progress or len(self.progress["chunk_times"]) < 3:
             return "Calculating...", 0.0
         
-        # Calculate chunks completed in this session only
-        session_completed_chunks = 0
-        if "chunk_times" in self.progress:
-            for chunk_time in self.progress["chunk_times"]:
-                chunk_timestamp = datetime.fromisoformat(chunk_time["time"])
-                if chunk_timestamp >= session_start:
-                    session_completed_chunks += 1
+        # Get the last 5 chunks to get a more stable rate
+        recent_chunks = self.progress["chunk_times"][-5:]
         
-        if session_completed_chunks == 0:
+        if len(recent_chunks) < 3:
             return "Calculating...", 0.0
         
-        # Calculate chunks per second based on current session
-        chunks_per_second = session_completed_chunks / elapsed_seconds
+        # Calculate average time between chunks, filtering out large gaps
+        intervals = []
+        for i in range(1, len(recent_chunks)):
+            prev_time = datetime.fromisoformat(recent_chunks[i-1]["time"])
+            curr_time = datetime.fromisoformat(recent_chunks[i]["time"])
+            interval = (curr_time - prev_time).total_seconds()
+            
+            # Only include intervals that seem reasonable (less than 2 minutes)
+            # This filters out gaps from session restarts
+            if interval < 120:  # 2 minutes max
+                intervals.append(interval)
+        
+        if len(intervals) == 0:
+            return "Calculating...", 0.0
+        
+        # Calculate average time per chunk from valid intervals
+        avg_time_per_chunk = sum(intervals) / len(intervals)
+        chunks_per_second = 1.0 / avg_time_per_chunk if avg_time_per_chunk > 0 else 0.0
         
         if chunks_per_second <= 0:
             return "Calculating...", 0.0
         
         # Calculate remaining time
         remaining_chunks = total - completed
-        remaining_seconds = remaining_chunks / chunks_per_second
+        remaining_seconds = remaining_chunks * avg_time_per_chunk
         
         # Format time
         if remaining_seconds < 60:
