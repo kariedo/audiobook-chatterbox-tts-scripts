@@ -680,8 +680,19 @@ class ProgressTracker:
         if elapsed_seconds <= 0:
             return "Calculating...", 0.0
         
-        # Calculate chunks per second
-        chunks_per_second = completed / elapsed_seconds
+        # Calculate chunks completed in this session only
+        session_completed_chunks = 0
+        if "chunk_times" in self.progress:
+            for chunk_time in self.progress["chunk_times"]:
+                chunk_timestamp = datetime.fromisoformat(chunk_time["time"])
+                if chunk_timestamp >= session_start:
+                    session_completed_chunks += 1
+        
+        if session_completed_chunks == 0:
+            return "Calculating...", 0.0
+        
+        # Calculate chunks per second based on current session
+        chunks_per_second = session_completed_chunks / elapsed_seconds
         
         if chunks_per_second <= 0:
             return "Calculating...", 0.0
