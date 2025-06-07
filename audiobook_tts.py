@@ -735,7 +735,7 @@ class AudiobookTTS:
     def __init__(self, voice_file: Optional[str] = None, max_workers: int = 2, 
                  exaggeration: float = 0.8, cfg_weight: float = 0.8, pitch_shift: float = 0.0,
                  mp3_bitrate: str = "128k", mp3_enabled: bool = False, remove_wav: bool = False,
-                 split_minutes: int = 5):
+                 split_minutes: int = 5, memory_cleanup_interval: int = 10):
         self.device = setup_mac_compatibility()
         logging.info(f"Initializing Chatterbox TTS on {self.device}...")
         
@@ -778,14 +778,22 @@ class AudiobookTTS:
                 if self.split_minutes > 0:
                     logging.info(f"✂️ File splitting enabled (max {split_minutes} minutes per file)")
         
+        # Initialize memory tracking
+        self.chunks_since_cleanup = 0
+        self.cleanup_interval = memory_cleanup_interval  # Clear cache every N chunks
+        
         # Warmup
         with torch.no_grad():
             _ = self.model.generate("Warmup", exaggeration=self.exaggeration, cfg_weight=self.cfg_weight)
+        
+        # Initial cleanup after warmup
+        self._force_memory_cleanup()
         
         logging.info(f"✅ TTS model ready for audiobook generation")
         logging.info(f"   Voice settings: exag={self.exaggeration}, cfg={self.cfg_weight}")
         if self.pitch_shift != 0:
             logging.info(f"   Pitch shift: {self.pitch_shift:+.1f} semitones")
+        logging.info(f"   Memory cleanup interval: every {self.cleanup_interval} chunks")
     
     def apply_pitch_shift(self, wav: torch.Tensor) -> torch.Tensor:
         """Apply pitch shifting to generated audio"""
@@ -812,16 +820,71 @@ class AudiobookTTS:
             logging.warning(f"Pitch shift failed: {e}, using original audio")
             return wav
     
+    def _get_memory_usage(self) -> dict:
+        """Get current memory usage statistics"""
+        import psutil
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        
+        stats = {
+            'rss_mb': memory_info.rss / 1024 / 1024,  # Physical memory
+            'vms_mb': memory_info.vms / 1024 / 1024,  # Virtual memory
+        }
+        
+        # Add GPU memory if available
+        if self.device == "mps" and hasattr(torch.mps, 'current_allocated_memory'):
+            try:
+                stats['gpu_allocated_mb'] = torch.mps.current_allocated_memory() / 1024 / 1024
+            except:
+                pass
+        elif self.device == "cuda":
+            try:
+                stats['gpu_allocated_mb'] = torch.cuda.memory_allocated() / 1024 / 1024
+                stats['gpu_reserved_mb'] = torch.cuda.memory_reserved() / 1024 / 1024
+            except:
+                pass
+        
+        return stats
+    
+    def _force_memory_cleanup(self):
+        """Force aggressive memory cleanup"""
+        # Log memory before cleanup
+        memory_before = self._get_memory_usage()
+        
+        if self.device == "mps":
+            torch.mps.empty_cache()
+            torch.mps.synchronize()
+        elif self.device == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
+        
+        # Log memory after cleanup
+        memory_after = self._get_memory_usage()
+        rss_freed = memory_before.get('rss_mb', 0) - memory_after.get('rss_mb', 0)
+        gpu_freed = memory_before.get('gpu_allocated_mb', 0) - memory_after.get('gpu_allocated_mb', 0)
+        
+        if rss_freed > 10 or gpu_freed > 10:  # Only log if significant cleanup occurred
+            logging.info(f"💾 Memory cleanup freed: {rss_freed:.1f}MB RAM, {gpu_freed:.1f}MB GPU")
+    
     def generate_chunk(self, chunk_text: str, output_file: Path) -> bool:
         """Generate audio for a single chunk with memory management"""
         try:
-            # Aggressive memory cleanup before generation
-            if self.device == "mps":
-                torch.mps.empty_cache()
-                torch.mps.synchronize()
-            elif self.device == "cuda":
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+            # Periodic deep memory cleanup
+            self.chunks_since_cleanup += 1
+            if self.chunks_since_cleanup >= self.cleanup_interval:
+                logging.info(f"🧹 Performing periodic memory cleanup (every {self.cleanup_interval} chunks)")
+                self._force_memory_cleanup()
+                self.chunks_since_cleanup = 0
+            else:
+                # Light cleanup before each generation
+                if self.device == "mps":
+                    torch.mps.empty_cache()
+                elif self.device == "cuda":
+                    torch.cuda.empty_cache()
             
             with torch.no_grad():
                 if self.voice_file and os.path.exists(self.voice_file):
@@ -847,22 +910,19 @@ class AudiobookTTS:
             # Immediate cleanup
             del wav
             
-            # Aggressive GPU memory cleanup after generation
+            # Light cleanup after generation (deep cleanup handled periodically)
             if self.device == "mps":
                 torch.mps.empty_cache()
-                torch.mps.synchronize()
             elif self.device == "cuda":
                 torch.cuda.empty_cache()
-                torch.cuda.synchronize()
             
             return True
             
         except torch.mps.OutOfMemoryError as e:
             logging.error(f"MPS out of memory generating chunk: {e}")
-            # Aggressive cleanup on OOM
-            if self.device == "mps":
-                torch.mps.empty_cache()
-                torch.mps.synchronize()
+            # Force aggressive cleanup on OOM and reset counter
+            self._force_memory_cleanup()
+            self.chunks_since_cleanup = 0
             return False
         except Exception as e:
             logging.error(f"Error generating chunk: {e}")
@@ -931,17 +991,21 @@ class AudiobookTTS:
             
             # Add delay between chunks for memory recovery
             import time
-            time.sleep(0.5)
+            time.sleep(0.8)  # Increased delay for better memory recovery
+            
+            # Record processing start time
+            chunk_start_time = time.time()
             
             success = self.generate_chunk(chunk_text, chunk_file)
+            chunk_duration = time.time() - chunk_start_time
             
             if success:
                 progress.mark_chunk_completed(chunk_index)
                 try:
                     audio_length = ta.info(str(chunk_file)).num_frames / ta.info(str(chunk_file)).sample_rate
-                    logging.info(f"✅ Completed chunk {chunk_index:04d} ({audio_length:.1f}s)")
+                    logging.info(f"✅ Completed chunk {chunk_index:04d} ({chunk_duration:.1f}s)")
                 except Exception:
-                    logging.info(f"✅ Completed chunk {chunk_index:04d}")
+                    logging.info(f"✅ Completed chunk {chunk_index:04d} ({chunk_duration:.1f}s)")
             else:
                 progress.mark_chunk_failed(chunk_index)
                 logging.error(f"❌ Failed chunk {chunk_index:04d}")
@@ -991,6 +1055,13 @@ class AudiobookTTS:
                     
                     logging.info(f"📊 Progress: {total_completed}/{total_chunks} ({percentage:.1f}%) completed, {total_failed} failed")
                     logging.info(f"⏱️ ETA: {eta_str} (Rate: {chunks_per_sec:.1f} chunks/sec)")
+                    
+                    # Log memory usage every 50 chunks to monitor trends
+                    if total_completed % 50 == 0 and total_completed > 0:
+                        memory_stats = self._get_memory_usage()
+                        ram_usage = memory_stats.get('rss_mb', 0)
+                        gpu_usage = memory_stats.get('gpu_allocated_mb', 0)
+                        logging.info(f"💾 Memory usage: {ram_usage:.0f}MB RAM, {gpu_usage:.0f}MB GPU")
                     
                 except Exception as e:
                     logging.error(f"Chunk processing error: {e}")
@@ -1245,6 +1316,13 @@ Examples:
         help="Split output into files of maximum X minutes each (default: 5, set to 0 to disable)"
     )
     
+    parser.add_argument(
+        "--memory-cleanup-interval",
+        type=int,
+        default=10,
+        help="Perform deep memory cleanup every N chunks to prevent slowdown (default: 10, lower=more frequent)"
+    )
+    
     args = parser.parse_args()
     
     # Validate input file
@@ -1304,7 +1382,8 @@ Examples:
             mp3_enabled=args.mp3,
             mp3_bitrate=args.mp3_bitrate,
             remove_wav=args.remove_wav,
-            split_minutes=args.split_minutes
+            split_minutes=args.split_minutes,
+            memory_cleanup_interval=args.memory_cleanup_interval
         )
         
         # Process audiobook
