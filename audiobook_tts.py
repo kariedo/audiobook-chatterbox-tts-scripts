@@ -14,12 +14,27 @@ import json
 import re
 import subprocess
 import shutil
+import warnings
 from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 import hashlib
 import math
+
+# Suppress known warnings from dependencies
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*LoRACompatibleLinear.*")
+warnings.filterwarnings("ignore", message=".*torch.backends.cuda.sdp_kernel.*")
+warnings.filterwarnings("ignore", message=".*LlamaSdpaAttention.*")
+warnings.filterwarnings("ignore", message=".*past_key_values.*")
+warnings.filterwarnings("ignore", message=".*attn_implementation.*")
+warnings.filterwarnings("ignore", message=".*scaled_dot_product_attention.*")
+
+# Set environment variables to suppress additional warnings
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
 
 import torch
 import torchaudio as ta
