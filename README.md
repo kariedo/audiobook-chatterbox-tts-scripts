@@ -30,6 +30,7 @@ Converts text files and ebooks into complete audiobooks with professional featur
 - **✂️ Time-limited file splitting (5 minutes default)**
 - **📝 Proper file naming convention: `<filename>_001.mp3`, `<filename>_002.mp3`**
 - **🧹 Optional WAV file cleanup to save disk space**
+- **🏷️ MP3 metadata tagging with author and book title**
 - **⏱️ Real-time ETA calculation and progress percentage**
 - **🧠 Optimized memory management for Apple Silicon**
 - **🔕 Clean output with suppressed dependency warnings**
@@ -58,11 +59,11 @@ python audiobook_tts.py novel.epub \
   --split-minutes 7 \
   --remove-wav
 
-# High-quality MP3 with 10-minute segments
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k --split-minutes 10
+# High-quality MP3 with 10-minute segments and metadata
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k --split-minutes 10 --tag "Author Name - Book Title"
 
-# Space-saving mobile version with 3-minute segments
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --split-minutes 3 --remove-wav
+# Space-saving mobile version with 3-minute segments and metadata
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --split-minutes 3 --remove-wav --tag "Arthur Conan Doyle - The Adventures of Sherlock Holmes"
 ```
 
 **File Splitting Options:**
@@ -75,6 +76,7 @@ python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --split-minutes 3 --rem
 - `--mp3`: Enable MP3 conversion using FFmpeg
 - `--mp3-bitrate`: Choose quality (`64k`, `96k`, `128k`, `160k`, `192k`, `256k`, `320k`)
 - `--remove-wav`: Delete WAV files after MP3 conversion to save space
+- `--tag "Author - Title"`: Add MP3 metadata with author and book title
 
 **Output Examples:**
 
@@ -359,6 +361,41 @@ your_project/
 - **Progress Tracking:** Real-time ETA and completion percentage display
 - **Clean Output:** Dependency warnings automatically suppressed for cleaner logs
 
+## 🏷️ MP3 Metadata and Tagging
+
+**Automatic MP3 Metadata Support:**
+- Add author and book information to generated MP3 files
+- Proper track numbering for split files
+- Compatible with media players and podcast apps
+- Genre automatically set to "Audiobook"
+
+**Usage:**
+```bash
+# Basic metadata with author and title
+python audiobook_tts.py book.txt --mp3 --tag "Arthur Conan Doyle - The Adventures of Sherlock Holmes"
+
+# Split files get automatic track numbering and titles:
+# - Track 1: "The Adventures of Sherlock Holmes - Part 1"
+# - Track 2: "The Adventures of Sherlock Holmes - Part 2"
+# - etc.
+
+# If no author separator, entire string becomes title
+python audiobook_tts.py book.txt --mp3 --tag "Book Title Only"
+```
+
+**Metadata Applied:**
+- **Artist/Author:** From text before " - " separator
+- **Album:** Book title (text after " - " separator or entire string)
+- **Title:** Book title for single files, "Book Title - Part N" for split files
+- **Track:** Sequential numbering for split files (1, 2, 3, etc.)
+- **Genre:** Automatically set to "Audiobook"
+
+**Media Player Benefits:**
+- Organized library browsing by author and book
+- Proper track progression in playlists
+- Audiobook-specific categorization
+- Seamless integration with podcast and audiobook apps
+
 ## 🎵 File Splitting and MP3 Quality Guidelines
 
 **File Splitting Benefits:**
@@ -481,9 +518,10 @@ python audiobook_tts.py article.txt \
   --mp3 \
   --mp3-bitrate 160k \
   --split-minutes 5 \
-  --remove-wav
+  --remove-wav \
+  --tag "Author Name - Article Title"
 
-# Complete workflow with custom voice, MP3, and 3-minute segments
+# Complete workflow with custom voice, MP3, metadata, and 3-minute segments
 python voice_harvester.py --extract narrator_audiobook.mp3
 python voice_pitch_tuner.py --voice extracted_voices/voice_segment_003.wav --interactive
 python audiobook_tts.py novel.epub \
@@ -492,7 +530,8 @@ python audiobook_tts.py novel.epub \
   --mp3 \
   --mp3-bitrate 160k \
   --split-minutes 3 \
-  --remove-wav
+  --remove-wav \
+  --tag "Author Name - Novel Title"
 
 # Quick audiobook with pitch adjustment and 5-minute MP3 segments
 python audiobook_tts.py book.txt --pitch-shift -1 --limit-minutes 30 --mp3 --split-minutes 5
@@ -534,9 +573,9 @@ python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --split-minutes 5
 ### Space-Saving Workflows
 
 ```bash
-# Generate with immediate cleanup and splitting
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 128k --split-minutes 5 --remove-wav
-# Result: Only numbered MP3 files remain (book_001.mp3, book_002.mp3, etc.)
+# Generate with immediate cleanup, splitting, and metadata
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 128k --split-minutes 5 --remove-wav --tag "Author Name - Book Title"
+# Result: Only numbered MP3 files remain (book_001.mp3, book_002.mp3, etc.) with proper metadata
 
 # Compare file splitting approaches
 python audiobook_tts.py book.txt --mp3 --split-minutes 3   # Many small files
@@ -547,9 +586,11 @@ python audiobook_tts.py book.txt --mp3 --split-minutes 0   # Single file
 ### Batch Processing with File Splitting
 
 ```bash
-# Process multiple books with consistent 5-minute splitting
+# Process multiple books with consistent 5-minute splitting and metadata
 for book in *.epub; do
-    python audiobook_tts.py "$book" --mp3 --mp3-bitrate 160k --split-minutes 5 --remove-wav
+    # Extract base name for title
+    title=$(basename "$book" .epub)
+    python audiobook_tts.py "$book" --mp3 --mp3-bitrate 160k --split-minutes 5 --remove-wav --tag "Unknown Author - $title"
 done
 
 # Batch process web articles
@@ -559,10 +600,10 @@ while IFS= read -r url; do
     python audiobook_tts.py "$filename" --mp3 --mp3-bitrate 128k --split-minutes 3
 done < urls.txt
 
-# Create different versions for different use cases
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --split-minutes 3    # Mobile
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 192k --split-minutes 10  # Desktop
-python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k --split-minutes 0   # Archive
+# Create different versions for different use cases with metadata
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --split-minutes 3 --tag "Author - Book Title"    # Mobile
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 192k --split-minutes 10 --tag "Author - Book Title"  # Desktop
+python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k --split-minutes 0 --tag "Author - Book Title"   # Archive
 ```
 
 ## 🎛️ Advanced File Management

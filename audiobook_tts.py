@@ -80,8 +80,8 @@ class AudioConverter:
     
     @staticmethod
     def convert_to_mp3(wav_file: Path, mp3_file: Path, bitrate: str = "128k", 
-                       remove_wav: bool = False) -> bool:
-        """Convert WAV file to MP3 using FFmpeg"""
+                       remove_wav: bool = False, metadata: dict = None) -> bool:
+        """Convert WAV file to MP3 using FFmpeg with optional metadata"""
         
         if not AudioConverter.check_ffmpeg_available():
             logging.error("❌ FFmpeg not found! Please install FFmpeg for MP3 conversion")
@@ -98,9 +98,25 @@ class AudioConverter:
                 '-ar', '22050',               # Sample rate (good for speech)
                 '-ac', '1',                   # Mono (smaller file, fine for audiobooks)
                 '-compression_level', '2',    # Good compression vs speed balance
+            ]
+            
+            # Add metadata if provided
+            if metadata:
+                if metadata.get('artist'):
+                    cmd.extend(['-metadata', f"artist={metadata['artist']}"])
+                if metadata.get('album'):
+                    cmd.extend(['-metadata', f"album={metadata['album']}"])
+                if metadata.get('title'):
+                    cmd.extend(['-metadata', f"title={metadata['title']}"])
+                if metadata.get('track'):
+                    cmd.extend(['-metadata', f"track={metadata['track']}"])
+                if metadata.get('genre'):
+                    cmd.extend(['-metadata', f"genre={metadata['genre']}"])
+            
+            cmd.extend([
                 '-y',                         # Overwrite output file
                 str(mp3_file)
-            ]
+            ])
             
             logging.info(f"🔄 Converting {wav_file.name} to MP3 (bitrate: {bitrate})...")
             
@@ -191,8 +207,8 @@ class AudioSplitter:
     @staticmethod
     def split_audio_by_time(input_file: Path, output_base_name: str, max_minutes: int = 5, 
                            mp3_enabled: bool = False, mp3_bitrate: str = "128k", 
-                           remove_wav: bool = False) -> List[Path]:
-        """Split audio file into time-limited segments"""
+                           remove_wav: bool = False, metadata: dict = None) -> List[Path]:
+        """Split audio file into time-limited segments with optional metadata"""
         
         if not AudioConverter.check_ffmpeg_available():
             logging.error("❌ FFmpeg not found! Cannot split audio files")
@@ -235,9 +251,31 @@ class AudioSplitter:
                     '-ar', '22050',              # Sample rate
                     '-ac', '1',                  # Mono
                     *codec_args,                 # Codec specific args
+                ]
+                
+                # Add metadata if MP3 and metadata provided
+                if mp3_enabled and metadata:
+                    if metadata.get('artist'):
+                        cmd.extend(['-metadata', f"artist={metadata['artist']}"])
+                    if metadata.get('album'):
+                        cmd.extend(['-metadata', f"album={metadata['album']}"])
+                    if metadata.get('title'):
+                        # For segments, create title with track info
+                        track_title = f"{metadata.get('title', 'Audiobook')} - Part {i+1}"
+                        cmd.extend(['-metadata', f"title={track_title}"])
+                    else:
+                        cmd.extend(['-metadata', f"title=Part {i+1}"])
+                    if metadata.get('track'):
+                        cmd.extend(['-metadata', f"track={i+1}"])
+                    else:
+                        cmd.extend(['-metadata', f"track={i+1}"])
+                    if metadata.get('genre'):
+                        cmd.extend(['-metadata', f"genre={metadata['genre']}"])
+                
+                cmd.extend([
                     '-y',                        # Overwrite
                     str(output_file)
-                ]
+                ])
                 
                 logging.info(f"📁 Creating segment {segment_num}: {start_time//60:02d}:{start_time%60:02d} - {(start_time+max_seconds)//60:02d}:{(start_time+max_seconds)%60:02d}")
                 
@@ -735,7 +773,8 @@ class AudiobookTTS:
     def __init__(self, voice_file: Optional[str] = None, max_workers: int = 2, 
                  exaggeration: float = 0.8, cfg_weight: float = 0.8, pitch_shift: float = 0.0,
                  mp3_bitrate: str = "128k", mp3_enabled: bool = False, remove_wav: bool = False,
-                 split_minutes: int = 5, memory_cleanup_interval: int = 5, debug_memory: bool = False):
+                 split_minutes: int = 5, memory_cleanup_interval: int = 5, debug_memory: bool = False,
+                 metadata: dict = None):
         self.device = setup_mac_compatibility()
         logging.info(f"Initializing Chatterbox TTS on {self.device}...")
         
@@ -762,6 +801,9 @@ class AudiobookTTS:
         
         # File splitting settings
         self.split_minutes = split_minutes
+        
+        # MP3 metadata settings
+        self.metadata = metadata or {}
         
         # Check FFmpeg availability if MP3 is enabled or splitting is requested
         if self.mp3_enabled or self.split_minutes > 0:
@@ -1436,7 +1478,8 @@ class AudiobookTTS:
                 max_minutes=self.split_minutes,
                 mp3_enabled=self.mp3_enabled,
                 mp3_bitrate=self.mp3_bitrate,
-                remove_wav=self.remove_wav
+                remove_wav=self.remove_wav,
+                metadata=self.metadata
             )
             
             if split_files:
@@ -1463,7 +1506,8 @@ class AudiobookTTS:
                 wav_file=final_wav_file,
                 mp3_file=final_mp3_file,
                 bitrate=self.mp3_bitrate,
-                remove_wav=self.remove_wav
+                remove_wav=self.remove_wav,
+                metadata=self.metadata
             )
             
             if conversion_success:
@@ -1528,7 +1572,8 @@ Examples:
   python audiobook_tts.py story.epub --limit-minutes 30 --mp3
   python audiobook_tts.py document.txt --voice voices/reader.wav --mp3 --mp3-bitrate 192k
   python audiobook_tts.py book.txt --mp3 --remove-wav --mp3-bitrate 256k --split-minutes 10
-  python audiobook_tts.py novel.txt --split-minutes 3 --mp3
+  python audiobook_tts.py novel.txt --split-minutes 3 --mp3 --tag "Author Name - Book Title"
+  python audiobook_tts.py book.txt --mp3 --tag "Arthur Conan Doyle - The Adventures of Sherlock Holmes"
         """
     )
     
@@ -1618,6 +1663,13 @@ Examples:
         help="Enable detailed memory usage logging for every chunk to debug performance issues"
     )
     
+    # MP3 metadata arguments
+    parser.add_argument(
+        "--tag",
+        type=str,
+        help="MP3 metadata in format 'Author - Book Title' (e.g., 'Arthur Conan Doyle - The Adventures of Sherlock Holmes')"
+    )
+    
     args = parser.parse_args()
     
     # Validate input file
@@ -1640,6 +1692,22 @@ Examples:
     if args.split_minutes < 0:
         logging.error("--split-minutes must be 0 or positive")
         sys.exit(1)
+    
+    # Parse metadata from tag if provided
+    metadata = {}
+    if args.tag:
+        # Parse format: "Author - Book Title"
+        if ' - ' in args.tag:
+            author, title = args.tag.split(' - ', 1)
+            metadata['artist'] = author.strip()
+            metadata['album'] = title.strip()
+            metadata['title'] = title.strip()
+            metadata['genre'] = 'Audiobook'
+        else:
+            # If no separator, treat entire string as title
+            metadata['album'] = args.tag.strip()
+            metadata['title'] = args.tag.strip()
+            metadata['genre'] = 'Audiobook'
     
     # Log configuration
     logging.info("🎙️ Audiobook TTS Generator Starting...")
@@ -1666,6 +1734,13 @@ Examples:
     if args.remove_wav:
         logging.info(f"   Remove WAV files: {args.remove_wav}")
     
+    if metadata:
+        logging.info("🏷️ MP3 Metadata:")
+        if metadata.get('artist'):
+            logging.info(f"   Author: {metadata['artist']}")
+        if metadata.get('album'):
+            logging.info(f"   Book: {metadata['album']}")
+    
     try:
         # Initialize TTS generator
         tts_generator = AudiobookTTS(
@@ -1679,7 +1754,8 @@ Examples:
             remove_wav=args.remove_wav,
             split_minutes=args.split_minutes,
             memory_cleanup_interval=args.memory_cleanup_interval,
-            debug_memory=args.debug_memory
+            debug_memory=args.debug_memory,
+            metadata=metadata
         )
         
         # Process audiobook
