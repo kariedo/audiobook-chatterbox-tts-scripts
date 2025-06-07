@@ -202,13 +202,99 @@ class AudioConverter:
             return {}
 
 class AudioSplitter:
-    """Handles splitting audio files into time-limited segments"""
+    """Handles splitting audio files into time-limited segments with sentence boundary awareness"""
+    
+    @staticmethod
+    def find_silence_breaks(input_file: Path, min_silence_duration: float = 0.3, 
+                           silence_threshold: float = -40) -> List[float]:
+        """Find silence breaks in audio that likely correspond to sentence boundaries"""
+        
+        if not AudioConverter.check_ffmpeg_available():
+            return []
+        
+        try:
+            # Use FFmpeg to detect silence
+            cmd = [
+                'ffmpeg',
+                '-i', str(input_file),
+                '-af', f'silencedetect=noise={silence_threshold}dB:d={min_silence_duration}',
+                '-f', 'null',
+                '-'
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            
+            # Parse silence detection output
+            silence_breaks = []
+            
+            for line in result.stderr.split('\n'):
+                if 'silence_end:' in line:
+                    # Extract the end time of silence (good split point)
+                    try:
+                        # Format: [silencedetect @ 0x...] silence_end: 12.345 | silence_duration: 0.678
+                        parts = line.split('silence_end:')[1].split('|')[0].strip()
+                        silence_end_time = float(parts)
+                        silence_breaks.append(silence_end_time)
+                    except (IndexError, ValueError):
+                        continue
+            
+            logging.info(f"🔍 Found {len(silence_breaks)} potential sentence breaks in audio")
+            return sorted(silence_breaks)
+            
+        except Exception as e:
+            logging.warning(f"Could not detect silence breaks: {e}")
+            return []
+    
+    @staticmethod
+    def find_optimal_split_points(total_duration: float, target_duration: float, 
+                                 silence_breaks: List[float], tolerance: float = 0.15) -> List[float]:
+        """Find optimal split points that respect sentence boundaries while staying close to target duration"""
+        
+        if not silence_breaks:
+            # Fallback to fixed intervals if no silence detection
+            num_segments = math.ceil(total_duration / target_duration)
+            return [i * target_duration for i in range(1, num_segments)]
+        
+        split_points = []
+        current_target = target_duration
+        max_tolerance = target_duration * tolerance  # Allow 15% deviation by default
+        
+        while current_target < total_duration:
+            # Find the silence break closest to our target time
+            best_break = None
+            best_distance = float('inf')
+            
+            for break_time in silence_breaks:
+                # Only consider breaks that haven't been used and are within tolerance
+                if break_time <= current_target + max_tolerance and break_time >= current_target - max_tolerance:
+                    distance = abs(break_time - current_target)
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_break = break_time
+            
+            if best_break is not None:
+                split_points.append(best_break)
+                # Next target is based on actual split point, not ideal interval
+                current_target = best_break + target_duration
+            else:
+                # No good break found, use the target time (fallback)
+                split_points.append(current_target)
+                current_target += target_duration
+        
+        logging.info(f"📍 Selected {len(split_points)} optimal split points with sentence boundaries")
+        return split_points
     
     @staticmethod
     def split_audio_by_time(input_file: Path, output_base_name: str, max_minutes: int = 5, 
                            mp3_enabled: bool = False, mp3_bitrate: str = "128k", 
-                           remove_wav: bool = False, metadata: dict = None) -> List[Path]:
-        """Split audio file into time-limited segments with optional metadata"""
+                           remove_wav: bool = False, metadata: dict = None, 
+                           smart_split: bool = True) -> List[Path]:
+        """Split audio file into time-limited segments with optional sentence boundary awareness"""
         
         if not AudioConverter.check_ffmpeg_available():
             logging.error("❌ FFmpeg not found! Cannot split audio files")
@@ -224,15 +310,50 @@ class AudioSplitter:
                 return []
             
             max_seconds = max_minutes * 60
-            num_segments = math.ceil(total_duration / max_seconds)
             
-            logging.info(f"🔄 Splitting audio into {num_segments} segments of max {max_minutes} minutes each...")
+            if smart_split:
+                # Find silence breaks that correspond to sentence boundaries
+                logging.info("🔍 Analyzing audio for sentence boundaries...")
+                silence_breaks = AudioSplitter.find_silence_breaks(
+                    input_file, 
+                    min_silence_duration=0.3,  # 300ms minimum silence
+                    silence_threshold=-35      # Adjust based on audio quality
+                )
+                
+                # Find optimal split points that respect sentence boundaries
+                split_points = AudioSplitter.find_optimal_split_points(
+                    total_duration, 
+                    max_seconds, 
+                    silence_breaks,
+                    tolerance=0.20  # Allow 20% deviation to find good breaks
+                )
+                
+                if not split_points:
+                    logging.warning("⚠️ No optimal split points found, using fixed intervals")
+                    num_segments = math.ceil(total_duration / max_seconds)
+                    split_points = [i * max_seconds for i in range(1, num_segments)]
+                else:
+                    logging.info(f"🎯 Using sentence-aware splitting with {len(split_points)} break points")
+            else:
+                # Use fixed time intervals (legacy behavior)
+                logging.info("⏰ Using fixed time intervals (sentence boundaries ignored)")
+                num_segments = math.ceil(total_duration / max_seconds)
+                split_points = [i * max_seconds for i in range(1, num_segments)]
+                silence_breaks = []  # No sentence boundary info
+            
+            logging.info(f"🔄 Splitting audio into {len(split_points) + 1} segments with sentence boundaries...")
             
             output_files = []
+            prev_split = 0.0
             
-            for i in range(num_segments):
-                start_time = i * max_seconds
+            for i, split_point in enumerate(split_points + [total_duration]):
                 segment_num = f"{i+1:03d}"
+                segment_start = prev_split
+                segment_duration = split_point - prev_split
+                
+                # Skip very short segments (less than 30 seconds)
+                if segment_duration < 30 and i < len(split_points):
+                    continue
                 
                 # Determine output format and filename
                 if mp3_enabled:
@@ -246,11 +367,11 @@ class AudioSplitter:
                 cmd = [
                     'ffmpeg',
                     '-i', str(input_file),
-                    '-ss', str(start_time),      # Start time
-                    '-t', str(max_seconds),      # Duration
-                    '-ar', '22050',              # Sample rate
-                    '-ac', '1',                  # Mono
-                    *codec_args,                 # Codec specific args
+                    '-ss', str(segment_start),      # Start time (sentence boundary)
+                    '-t', str(segment_duration),    # Duration (to next sentence boundary)
+                    '-ar', '22050',                 # Sample rate
+                    '-ac', '1',                     # Mono
+                    *codec_args,                    # Codec specific args
                 ]
                 
                 # Add metadata if MP3 and metadata provided
@@ -277,7 +398,12 @@ class AudioSplitter:
                     str(output_file)
                 ])
                 
-                logging.info(f"📁 Creating segment {segment_num}: {start_time//60:02d}:{start_time%60:02d} - {(start_time+max_seconds)//60:02d}:{(start_time+max_seconds)%60:02d}")
+                # Show the actual time range for this segment
+                start_min, start_sec = divmod(int(segment_start), 60)
+                end_time = segment_start + segment_duration
+                end_min, end_sec = divmod(int(end_time), 60)
+                
+                logging.info(f"📁 Creating segment {segment_num}: {start_min:02d}:{start_sec:02d} - {end_min:02d}:{end_sec:02d} ({segment_duration:.1f}s)")
                 
                 result = subprocess.run(
                     cmd,
@@ -293,9 +419,13 @@ class AudioSplitter:
                         
                         # Get segment info
                         segment_info = AudioConverter.get_audio_info(output_file)
-                        segment_duration = segment_info.get('duration', 0)
+                        actual_duration = segment_info.get('duration', 0)
                         
-                        logging.info(f"✅ Segment {segment_num} created: {segment_duration:.1f}s, {output_file.stat().st_size//1024//1024}MB")
+                        # Check if this split was at a sentence boundary
+                        is_sentence_boundary = split_point in silence_breaks if i < len(split_points) else True
+                        boundary_indicator = "🎯" if is_sentence_boundary else "⏰"
+                        
+                        logging.info(f"✅ Segment {segment_num} created: {actual_duration:.1f}s, {output_file.stat().st_size//1024//1024}MB {boundary_indicator}")
                     else:
                         logging.warning(f"⚠️ Segment {segment_num} is too small, skipping")
                         if output_file.exists():
@@ -303,6 +433,8 @@ class AudioSplitter:
                 else:
                     logging.error(f"❌ Failed to create segment {segment_num}")
                     logging.error(f"   stderr: {result.stderr}")
+                
+                prev_split = split_point
             
             # Remove original file if requested and segments were created successfully
             if remove_wav and output_files and input_file.suffix.lower() == '.wav':
@@ -556,13 +688,24 @@ class TextProcessor:
             return TextProcessor._read_text(file_path)
 
 class TextChunker:
-    """Intelligently chunks text for optimal TTS processing"""
+    """Intelligently chunks text for optimal TTS processing with sentence boundary respect"""
     
-    def __init__(self, max_chars: int = 200):
+    def __init__(self, max_chars: int = 200, min_chars: int = 50):
         self.max_chars = max_chars
+        self.min_chars = min_chars
+        
+        # Common abbreviations that don't end sentences
+        self.abbreviations = {
+            'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'vs', 'etc', 'inc', 'ltd', 'corp',
+            'co', 'st', 'ave', 'blvd', 'rd', 'apt', 'no', 'vol', 'ch', 'sec', 'fig', 'pg',
+            'pp', 'ed', 'eds', 'rev', 'repr', 'trans', 'cf', 'e.g', 'i.e', 'viz', 'al',
+            'govt', 'dept', 'univ', 'assn', 'bros', 'ph.d', 'm.d', 'b.a', 'm.a', 'j.d',
+            'u.s', 'u.k', 'u.s.a', 'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep',
+            'oct', 'nov', 'dec', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'
+        }
     
     def chunk_text(self, text: str) -> List[str]:
-        """Split text into optimal chunks for TTS"""
+        """Split text into optimal chunks respecting sentence boundaries"""
         
         # Clean up text
         text = self._clean_text(text)
@@ -576,32 +719,274 @@ class TextChunker:
             if not paragraph:
                 continue
             
-            if len(paragraph) <= self.max_chars:
-                chunks.append(paragraph)
-            else:
-                # Split long paragraphs at sentence boundaries
-                sentences = self._split_sentences(paragraph)
-                current_chunk = ""
-                
-                for sentence in sentences:
-                    if len(current_chunk + " " + sentence) <= self.max_chars and current_chunk:
-                        current_chunk += " " + sentence
-                    else:
-                        if current_chunk:
-                            chunks.append(current_chunk.strip())
-                        current_chunk = sentence
-                
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
+            # Get sentences from this paragraph
+            sentences = self._smart_sentence_split(paragraph)
+            
+            if not sentences:
+                continue
+            
+            # Group sentences into chunks
+            paragraph_chunks = self._group_sentences_into_chunks(sentences)
+            chunks.extend(paragraph_chunks)
         
-        return [chunk for chunk in chunks if chunk.strip()]
+        # Validate and clean up chunks
+        final_chunks = self._validate_chunks(chunks)
+        
+        return final_chunks
+    
+    def _smart_sentence_split(self, text: str) -> List[str]:
+        """Advanced sentence splitting that handles abbreviations and edge cases"""
+        
+        # First pass: identify potential sentence boundaries
+        potential_breaks = []
+        i = 0
+        
+        while i < len(text):
+            char = text[i]
+            
+            # Look for sentence-ending punctuation
+            if char in '.!?':
+                # Check if this is really a sentence end
+                if self._is_sentence_boundary(text, i):
+                    potential_breaks.append(i)
+            
+            i += 1
+        
+        # Split text at confirmed sentence boundaries
+        sentences = []
+        start = 0
+        
+        for break_pos in potential_breaks:
+            # Include the punctuation in the sentence
+            sentence = text[start:break_pos + 1].strip()
+            if sentence:
+                sentences.append(sentence)
+            start = break_pos + 1
+        
+        # Don't forget the last sentence if it doesn't end with punctuation
+        if start < len(text):
+            last_sentence = text[start:].strip()
+            if last_sentence:
+                # Add period if missing sentence-ending punctuation
+                if not last_sentence[-1] in '.!?':
+                    last_sentence += '.'
+                sentences.append(last_sentence)
+        
+        return sentences
+    
+    def _is_sentence_boundary(self, text: str, pos: int) -> bool:
+        """Determine if punctuation at position marks a real sentence boundary"""
+        
+        if pos >= len(text) - 1:
+            return True  # End of text
+        
+        char = text[pos]
+        
+        # Handle multiple punctuation (e.g., "...")
+        if pos < len(text) - 1 and text[pos + 1] in '.!?':
+            return False  # Part of multi-character punctuation
+        
+        # Look at the word before the punctuation
+        word_start = pos - 1
+        while word_start >= 0 and text[word_start].isalpha():
+            word_start -= 1
+        word_start += 1
+        
+        if word_start < pos:
+            word_before = text[word_start:pos].lower()
+            
+            # Check if it's a known abbreviation
+            if word_before in self.abbreviations:
+                return False
+            
+            # Check for single letter abbreviations (e.g., "A. Smith")
+            if len(word_before) == 1 and char == '.':
+                # Look ahead to see if next word is capitalized (likely a name)
+                next_word_start = pos + 1
+                while next_word_start < len(text) and text[next_word_start].isspace():
+                    next_word_start += 1
+                
+                if next_word_start < len(text) and text[next_word_start].isupper():
+                    return False  # Likely an initial
+        
+        # Look at what comes after the punctuation
+        next_char_pos = pos + 1
+        while next_char_pos < len(text) and text[next_char_pos].isspace():
+            next_char_pos += 1
+        
+        if next_char_pos >= len(text):
+            return True  # End of text
+        
+        next_char = text[next_char_pos]
+        
+        # Sentence boundary if next character is uppercase or quote
+        if next_char.isupper() or next_char in '"\'':
+            return True
+        
+        # Check for numbers (e.g., "version 2.0 was released")
+        if char == '.' and next_char.isdigit():
+            return False
+        
+        # Default to not a sentence boundary for lowercase continuation
+        return False
+    
+    def _group_sentences_into_chunks(self, sentences: List[str]) -> List[str]:
+        """Group sentences into chunks respecting size limits"""
+        
+        if not sentences:
+            return []
+        
+        chunks = []
+        current_chunk = ""
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            # Calculate the size if we add this sentence
+            if current_chunk:
+                test_chunk = current_chunk + " " + sentence
+            else:
+                test_chunk = sentence
+            
+            # If adding this sentence would exceed max_chars
+            if len(test_chunk) > self.max_chars:
+                # Save current chunk if it has content
+                if current_chunk and len(current_chunk.strip()) >= self.min_chars:
+                    chunks.append(current_chunk.strip())
+                
+                # Handle very long sentences that exceed max_chars by themselves
+                if len(sentence) > self.max_chars:
+                    # Split long sentence at clause boundaries
+                    clause_chunks = self._split_long_sentence(sentence)
+                    chunks.extend(clause_chunks)
+                    current_chunk = ""
+                else:
+                    current_chunk = sentence
+            else:
+                current_chunk = test_chunk
+        
+        # Don't forget the last chunk
+        if current_chunk and len(current_chunk.strip()) >= self.min_chars:
+            chunks.append(current_chunk.strip())
+        elif current_chunk.strip():
+            # Very short final chunk - try to merge with previous
+            if chunks:
+                last_chunk = chunks[-1] + " " + current_chunk.strip()
+                if len(last_chunk) <= self.max_chars * 1.1:  # Allow 10% overflow for merging
+                    chunks[-1] = last_chunk
+                else:
+                    chunks.append(current_chunk.strip())
+            else:
+                chunks.append(current_chunk.strip())
+        
+        return chunks
+    
+    def _split_long_sentence(self, sentence: str) -> List[str]:
+        """Split an overly long sentence at natural break points"""
+        
+        # Try to split at clause boundaries (commas, semicolons, conjunctions)
+        clause_patterns = [
+            r',\s+(?=and\s+)',     # ", and "
+            r',\s+(?=but\s+)',     # ", but "
+            r',\s+(?=or\s+)',      # ", or "
+            r',\s+(?=so\s+)',      # ", so "
+            r',\s+(?=yet\s+)',     # ", yet "
+            r';\s+',               # "; "
+            r',\s+(?=which\s+)',   # ", which "
+            r',\s+(?=that\s+)',    # ", that "
+            r',\s+(?=when\s+)',    # ", when "
+            r',\s+(?=where\s+)',   # ", where "
+            r',\s+(?=while\s+)',   # ", while "
+            r',\s+'                # Any other comma (last resort)
+        ]
+        
+        chunks = []
+        remaining = sentence
+        
+        while len(remaining) > self.max_chars and remaining:
+            best_split = -1
+            best_pattern = None
+            
+            # Find the best split point within our character limit
+            for pattern in clause_patterns:
+                matches = list(re.finditer(pattern, remaining))
+                for match in matches:
+                    split_pos = match.end()
+                    if split_pos <= self.max_chars:
+                        best_split = split_pos
+                        best_pattern = pattern
+                    else:
+                        break  # No more valid splits with this pattern
+                
+                if best_split > 0:
+                    break
+            
+            if best_split > 0:
+                # Split at the best position
+                chunk = remaining[:best_split].strip()
+                remaining = remaining[best_split:].strip()
+                
+                if chunk:
+                    chunks.append(chunk)
+            else:
+                # No good split found, force split at word boundary
+                words = remaining.split()
+                chunk_words = []
+                chunk_length = 0
+                
+                for word in words:
+                    test_length = chunk_length + len(word) + (1 if chunk_words else 0)
+                    if test_length <= self.max_chars:
+                        chunk_words.append(word)
+                        chunk_length = test_length
+                    else:
+                        break
+                
+                if chunk_words:
+                    chunk = ' '.join(chunk_words)
+                    chunks.append(chunk)
+                    remaining = ' '.join(words[len(chunk_words):])
+                else:
+                    # Single word longer than max_chars, just take it
+                    chunks.append(remaining)
+                    remaining = ""
+        
+        # Add remaining text
+        if remaining.strip():
+            chunks.append(remaining.strip())
+        
+        return chunks
+    
+    def _validate_chunks(self, chunks: List[str]) -> List[str]:
+        """Validate and clean up final chunks"""
+        
+        validated_chunks = []
+        
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            
+            # Ensure chunk doesn't start with punctuation or lowercase (except quotes)
+            if chunk and chunk[0].islower() and chunk[0] not in '"\'':
+                # Try to fix by capitalizing
+                chunk = chunk[0].upper() + chunk[1:]
+            
+            # Ensure chunk ends with sentence-ending punctuation
+            if chunk and chunk[-1] not in '.!?':
+                chunk += '.'
+            
+            # Remove chunks that are too short or just punctuation
+            if len(chunk.strip('.,!?;"\'')) >= 3:  # At least 3 non-punctuation characters
+                validated_chunks.append(chunk)
+        
+        return validated_chunks
     
     def _clean_text(self, text: str) -> str:
         """Clean and normalize text"""
-        # Remove excessive whitespace
-        text = re.sub(r'\s+', ' ', text)
-        
-        # Normalize quotes
+        # Normalize quotes first
         text = text.replace('"', '"').replace('"', '"')
         text = text.replace(''', "'").replace(''', "'")
         
@@ -609,21 +994,17 @@ class TextChunker:
         text = re.sub(r'\*\*\*+', '', text)  # Stars
         text = re.sub(r'---+', '', text)     # Dashes
         
+        # Remove excessive whitespace but preserve single spaces
+        text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces/tabs to single space
+        text = re.sub(r'\n\s*\n', '\n\n', text)  # Multiple newlines to double newlines
+        text = re.sub(r'[\r\f\v]+', ' ', text)  # Other whitespace to space
+        
+        # Fix spacing around punctuation (but preserve abbreviations)
+        text = re.sub(r'\s+([!?,:;])', r'\1', text)  # Remove space before punctuation (but not periods)
+        # Only add space after sentence end if it's followed by a letter (avoid abbreviations like U.S.A.)
+        text = re.sub(r'([.!?])([A-Z][a-z])', r'\1 \2', text)  # Ensure space after sentence end only for new sentences
+        
         return text.strip()
-    
-    def _split_sentences(self, text: str) -> List[str]:
-        """Split text into sentences"""
-        # Simple sentence splitting
-        sentences = re.split(r'[.!?]+', text)
-        
-        # Clean and filter
-        sentences = [s.strip() for s in sentences if s.strip()]
-        
-        # Add back punctuation to sentences (except the last one)
-        for i in range(len(sentences) - 1):
-            sentences[i] += "."
-        
-        return sentences
 
 class ProgressTracker:
     """Tracks processing progress and allows resuming"""
@@ -767,6 +1148,176 @@ class ProgressTracker:
             self.progress["session_start_time"] = datetime.now().isoformat()
             self.save_progress()
 
+class AudioValidator:
+    """Validates generated audio chunks for quality issues"""
+    
+    @staticmethod
+    def validate_audio_chunk(audio_file: Path, chunk_text: str, expected_duration_range: Tuple[float, float] = (0.5, 30.0)) -> dict:
+        """
+        Validate an audio chunk for common issues
+        
+        Returns dict with validation results:
+        - is_valid: bool
+        - issues: list of detected problems
+        - metrics: dict with audio metrics
+        """
+        validation_result = {
+            "is_valid": True,
+            "issues": [],
+            "metrics": {}
+        }
+        
+        try:
+            if not audio_file.exists():
+                validation_result["is_valid"] = False
+                validation_result["issues"].append("File does not exist")
+                return validation_result
+            
+            # Check file size
+            file_size = audio_file.stat().st_size
+            if file_size < 1024:  # Less than 1KB
+                validation_result["is_valid"] = False
+                validation_result["issues"].append(f"File too small: {file_size} bytes")
+                return validation_result
+            
+            # Load and analyze audio
+            try:
+                waveform, sample_rate = ta.load(str(audio_file))
+                validation_result["metrics"]["sample_rate"] = sample_rate
+                validation_result["metrics"]["channels"] = waveform.shape[0]
+                validation_result["metrics"]["samples"] = waveform.shape[1]
+                
+                # Calculate duration
+                duration = waveform.shape[1] / sample_rate
+                validation_result["metrics"]["duration"] = duration
+                
+                # Check duration is reasonable
+                if duration < expected_duration_range[0]:
+                    validation_result["issues"].append(f"Audio too short: {duration:.2f}s (expected min {expected_duration_range[0]}s)")
+                elif duration > expected_duration_range[1]:
+                    validation_result["issues"].append(f"Audio too long: {duration:.2f}s (expected max {expected_duration_range[1]}s)")
+                
+                # Check for silence (all samples near zero)
+                audio_rms = torch.sqrt(torch.mean(waveform ** 2))
+                validation_result["metrics"]["rms_level"] = float(audio_rms)
+                
+                if audio_rms < 0.001:  # Very quiet audio
+                    validation_result["issues"].append(f"Audio appears silent: RMS {audio_rms:.6f}")
+                
+                # Check for clipping (samples at max/min values)
+                max_amplitude = torch.max(torch.abs(waveform))
+                validation_result["metrics"]["max_amplitude"] = float(max_amplitude)
+                
+                if max_amplitude > 0.95:  # Near clipping
+                    validation_result["issues"].append(f"Audio may be clipped: max amplitude {max_amplitude:.3f}")
+                
+                # Check for DC offset
+                dc_offset = torch.mean(waveform)
+                validation_result["metrics"]["dc_offset"] = float(dc_offset)
+                
+                if abs(dc_offset) > 0.1:
+                    validation_result["issues"].append(f"Significant DC offset: {dc_offset:.3f}")
+                
+                # Check for excessive silence at start/end
+                silence_threshold = 0.01
+                start_silence, end_silence = AudioValidator._detect_silence_boundaries(waveform, silence_threshold)
+                validation_result["metrics"]["start_silence"] = start_silence / sample_rate
+                validation_result["metrics"]["end_silence"] = end_silence / sample_rate
+                
+                # Warn if more than 1 second of silence at start/end
+                if start_silence / sample_rate > 1.0:
+                    validation_result["issues"].append(f"Excessive silence at start: {start_silence/sample_rate:.2f}s")
+                if end_silence / sample_rate > 1.0:
+                    validation_result["issues"].append(f"Excessive silence at end: {end_silence/sample_rate:.2f}s")
+                
+                # Check for reasonable correlation with text length
+                text_length = len(chunk_text.strip())
+                words = len(chunk_text.split())
+                chars_per_second = text_length / duration if duration > 0 else 0
+                words_per_minute = (words * 60) / duration if duration > 0 else 0
+                
+                validation_result["metrics"]["text_length"] = text_length
+                validation_result["metrics"]["word_count"] = words
+                validation_result["metrics"]["chars_per_second"] = chars_per_second
+                validation_result["metrics"]["words_per_minute"] = words_per_minute
+                
+                # Typical reading speeds: 150-250 WPM, 8-15 chars/second
+                if words_per_minute > 300:
+                    validation_result["issues"].append(f"Speech too fast: {words_per_minute:.0f} WPM (expected < 300)")
+                elif words_per_minute < 50 and words > 5:  # Only flag if substantial text
+                    validation_result["issues"].append(f"Speech too slow: {words_per_minute:.0f} WPM (expected > 50)")
+                
+                # Check for audio artifacts (sudden volume spikes)
+                if len(waveform[0]) > sample_rate:  # Only for audio longer than 1 second
+                    volume_variance = AudioValidator._detect_volume_spikes(waveform)
+                    validation_result["metrics"]["volume_variance"] = volume_variance
+                    
+                    if volume_variance > 10.0:  # High variance indicates possible artifacts
+                        validation_result["issues"].append(f"High volume variance detected: {volume_variance:.2f} (possible artifacts)")
+                
+            except Exception as e:
+                validation_result["is_valid"] = False
+                validation_result["issues"].append(f"Audio loading error: {str(e)}")
+                return validation_result
+            
+            # Set overall validity
+            if validation_result["issues"]:
+                validation_result["is_valid"] = False
+                
+        except Exception as e:
+            validation_result["is_valid"] = False
+            validation_result["issues"].append(f"Validation error: {str(e)}")
+        
+        return validation_result
+    
+    @staticmethod
+    def _detect_silence_boundaries(waveform: torch.Tensor, threshold: float = 0.01) -> Tuple[int, int]:
+        """Detect silence at the start and end of audio"""
+        audio = waveform[0] if waveform.dim() > 1 else waveform
+        abs_audio = torch.abs(audio)
+        
+        # Find start of audio (first non-silent sample)
+        start_silence = 0
+        for i, sample in enumerate(abs_audio):
+            if sample > threshold:
+                start_silence = i
+                break
+        else:
+            start_silence = len(abs_audio)  # All silence
+        
+        # Find end of audio (last non-silent sample)
+        end_silence = 0
+        for i, sample in enumerate(reversed(abs_audio)):
+            if sample > threshold:
+                end_silence = i
+                break
+        else:
+            end_silence = len(abs_audio)  # All silence
+        
+        return start_silence, end_silence
+    
+    @staticmethod
+    def _detect_volume_spikes(waveform: torch.Tensor, window_size: int = 2048) -> float:
+        """Detect sudden volume changes that might indicate artifacts"""
+        audio = waveform[0] if waveform.dim() > 1 else waveform
+        
+        # Calculate RMS for overlapping windows
+        rms_values = []
+        for i in range(0, len(audio) - window_size, window_size // 2):
+            window = audio[i:i + window_size]
+            rms = torch.sqrt(torch.mean(window ** 2))
+            rms_values.append(float(rms))
+        
+        if len(rms_values) < 2:
+            return 0.0
+        
+        # Calculate variance in RMS levels (higher = more spiky)
+        rms_tensor = torch.tensor(rms_values)
+        variance = torch.var(rms_tensor)
+        
+        return float(variance)
+
+
 class AudiobookTTS:
     """Main TTS audiobook generator"""
     
@@ -774,7 +1325,7 @@ class AudiobookTTS:
                  exaggeration: float = 0.8, cfg_weight: float = 0.8, pitch_shift: float = 0.0,
                  mp3_bitrate: str = "128k", mp3_enabled: bool = False, remove_wav: bool = False,
                  split_minutes: int = 5, memory_cleanup_interval: int = 5, debug_memory: bool = False,
-                 metadata: dict = None):
+                 metadata: dict = None, smart_split: bool = True):
         self.device = setup_mac_compatibility()
         logging.info(f"Initializing Chatterbox TTS on {self.device}...")
         
@@ -801,6 +1352,7 @@ class AudiobookTTS:
         
         # File splitting settings
         self.split_minutes = split_minutes
+        self.smart_split = smart_split
         
         # MP3 metadata settings
         self.metadata = metadata or {}
@@ -944,33 +1496,91 @@ class AudiobookTTS:
             
         return stats
     
-    def _detect_performance_degradation(self, current_time: float) -> bool:
-        """Detect if performance is degrading and needs more aggressive cleanup"""
-        self.performance_history.append(current_time)
+    def _calculate_performance_metrics(self, generation_time: float, text_length: int, word_count: int, text_content: str = "") -> dict:
+        """Calculate performance metrics considering text complexity"""
+        if generation_time <= 0 or text_length <= 0:
+            return {"chars_per_sec": 0, "words_per_min": 0, "expected_time": 0, "performance_ratio": 1.0}
+        
+        # Calculate actual performance metrics
+        chars_per_sec = text_length / generation_time
+        words_per_min = (word_count * 60) / generation_time
+        
+        # Calculate expected generation time based on text complexity
+        # Base rate: ~10-15 chars/sec for typical TTS (varies by complexity)
+        base_chars_per_sec = 12.0  # Conservative baseline
+        
+        # Complexity adjustments
+        complexity_factor = 1.0
+        
+        # Longer texts may have slightly lower throughput due to memory usage
+        if text_length > 150:
+            complexity_factor *= 1.1
+        
+        # Texts with many punctuation marks are more complex (use text_content if provided, otherwise estimate)
+        if text_content:
+            punct_count = sum(1 for c in text_content if c in '.,!?;:()[]"\'')
+        else:
+            # Estimate based on typical punctuation density
+            punct_count = int(text_length * 0.08)  # ~8% punctuation in typical text
+        
+        punct_density = punct_count / max(text_length, 1)
+        if punct_density > 0.15:  # High punctuation density
+            complexity_factor *= 1.2
+        
+        expected_chars_per_sec = base_chars_per_sec / complexity_factor
+        expected_time = text_length / expected_chars_per_sec
+        
+        # Performance ratio: how we're doing vs expected (1.0 = exactly as expected, <1.0 = better, >1.0 = worse)
+        performance_ratio = generation_time / expected_time if expected_time > 0 else 1.0
+        
+        return {
+            "chars_per_sec": chars_per_sec,
+            "words_per_min": words_per_min,
+            "expected_time": expected_time,
+            "performance_ratio": performance_ratio
+        }
+    
+    def _detect_performance_degradation(self, current_time: float, text_length: int = 100, word_count: int = 20, text_content: str = "") -> bool:
+        """Detect if performance is degrading based on text-relative metrics"""
+        
+        # Calculate performance metrics for this chunk
+        perf_metrics = self._calculate_performance_metrics(current_time, text_length, word_count, text_content)
+        performance_ratio = perf_metrics["performance_ratio"]
+        
+        # Store performance ratios instead of absolute times
+        if not hasattr(self, 'performance_ratios'):
+            self.performance_ratios = []
+        
+        self.performance_ratios.append(performance_ratio)
         
         # Keep only last 15 measurements for faster detection
+        if len(self.performance_ratios) > 15:
+            self.performance_ratios = self.performance_ratios[-15:]
+        
+        # Still track absolute times for compatibility
+        self.performance_history.append(current_time)
         if len(self.performance_history) > 15:
             self.performance_history = self.performance_history[-15:]
         
         # Need at least 6 measurements to detect trend
-        if len(self.performance_history) < 6:
+        if len(self.performance_ratios) < 6:
             return False
         
-        # Check for immediate severe slowdown
-        if current_time > 12:  # Individual chunk taking >12s (lowered to catch issues earlier)
+        # Check for immediate severe slowdown (>3x expected time)
+        if performance_ratio > 3.0:
             return True
         
-        # Compare recent average to earlier average
-        recent_avg = sum(self.performance_history[-3:]) / 3  # Last 3 chunks
-        earlier_avg = sum(self.performance_history[:3]) / 3   # First 3 chunks
+        # Compare recent average to earlier average (using performance ratios)
+        recent_avg_ratio = sum(self.performance_ratios[-3:]) / 3  # Last 3 chunks
+        earlier_avg_ratio = sum(self.performance_ratios[:3]) / 3   # First 3 chunks
         
-        # If recent chunks are taking 40% longer, trigger cleanup (more sensitive)
-        degradation_threshold = 1.4
-        is_degraded = recent_avg > earlier_avg * degradation_threshold
+        # If recent chunks are taking 50% longer relative to text complexity
+        degradation_threshold = 1.5
+        is_degraded = recent_avg_ratio > earlier_avg_ratio * degradation_threshold
         
-        # Also check if we have consistent slow performance
-        recent_slow_count = sum(1 for t in self.performance_history[-5:] if t > 10)  # Lowered threshold for consistency check
-        if recent_slow_count >= 3:  # 3 out of last 5 chunks are slow
+        # Also check if we have consistent poor performance (>2x expected)
+        recent_slow_count = sum(1 for ratio in self.performance_ratios[-5:] if ratio > 2.0)
+        if recent_slow_count >= 3:  # 3 out of last 5 chunks are slow relative to text
             return True
             
         return is_degraded
@@ -1114,130 +1724,213 @@ class AudiobookTTS:
             logging.error(f"❌ Model reinitialization failed: {e}")
             return False
     
-    def generate_chunk(self, chunk_text: str, output_file: Path) -> bool:
-        """Generate audio for a single chunk with memory management"""
+    def generate_chunk(self, chunk_text: str, output_file: Path, max_retries: int = 2) -> bool:
+        """Generate audio for a single chunk with validation and retry logic"""
         import time
         chunk_start_time = time.time()
         
-        try:
-            # More frequent light cleanup every 3 chunks
-            self.chunks_since_cleanup += 1
-            
-            # Always do light cleanup before generation
-            if self.device == "mps":
-                torch.mps.empty_cache()
-            elif self.device == "cuda":
-                torch.cuda.empty_cache()
-            
-            # Periodic deep cleanup
-            if self.chunks_since_cleanup >= self.cleanup_interval:
-                logging.info(f"🧹 Performing periodic memory cleanup (every {self.cleanup_interval} chunks)")
-                self._force_memory_cleanup()
+        for attempt in range(max_retries + 1):
+            is_retry = attempt > 0
+            if is_retry:
+                logging.warning(f"🔄 Retry attempt {attempt}/{max_retries} for chunk generation")
+                # Aggressive cleanup before retry
+                self._force_memory_cleanup(aggressive=True)
                 self.chunks_since_cleanup = 0
-            elif self.chunks_since_cleanup % 2 == 0:
-                # Light cleanup every 2 chunks including model cache clearing (more frequent)
-                self._clear_model_caches()
-                import gc
-                gc.collect()
-            
-            # Track memory before TTS generation
-            memory_before_tts = self._get_memory_usage()
-            tts_start_time = time.time()
-            
-            with torch.no_grad():
-                if self.voice_file and os.path.exists(self.voice_file):
-                    wav = self.model.generate(
-                        chunk_text,
-                        audio_prompt_path=self.voice_file,
-                        exaggeration=self.exaggeration,
-                        cfg_weight=self.cfg_weight
-                    )
-                else:
-                    wav = self.model.generate(
-                        chunk_text,
-                        exaggeration=self.exaggeration,
-                        cfg_weight=self.cfg_weight
-                    )
-            
-            tts_duration = time.time() - tts_start_time
-            memory_after_tts = self._get_memory_usage()
-            
-            # Log TTS-specific metrics for slow generations or debug mode
-            if tts_duration > 10 or self.debug_memory:  # Lowered threshold to catch more issues
-                gpu_growth = memory_after_tts.get('gpu_allocated_mb', 0) - memory_before_tts.get('gpu_allocated_mb', 0)
-                tensor_growth = memory_after_tts.get('torch_tensor_count', 0) - memory_before_tts.get('torch_tensor_count', 0)
+                time.sleep(1.0)  # Brief pause before retry
                 
-                # Add text complexity metrics for correlation analysis
+            try:
+                # More frequent light cleanup every 3 chunks
+                if not is_retry:  # Skip on retries since we do aggressive cleanup above
+                    self.chunks_since_cleanup += 1
+                    
+                    # Always do light cleanup before generation
+                    if self.device == "mps":
+                        torch.mps.empty_cache()
+                    elif self.device == "cuda":
+                        torch.cuda.empty_cache()
+                    
+                    # Periodic deep cleanup
+                    if self.chunks_since_cleanup >= self.cleanup_interval:
+                        logging.info(f"🧹 Performing periodic memory cleanup (every {self.cleanup_interval} chunks)")
+                        self._force_memory_cleanup()
+                        self.chunks_since_cleanup = 0
+                    elif self.chunks_since_cleanup % 2 == 0:
+                        # Light cleanup every 2 chunks including model cache clearing (more frequent)
+                        self._clear_model_caches()
+                        import gc
+                        gc.collect()
+                
+                # Track memory before TTS generation
+                memory_before_tts = self._get_memory_usage()
+                tts_start_time = time.time()
+                
+                with torch.no_grad():
+                    if self.voice_file and os.path.exists(self.voice_file):
+                        wav = self.model.generate(
+                            chunk_text,
+                            audio_prompt_path=self.voice_file,
+                            exaggeration=self.exaggeration,
+                            cfg_weight=self.cfg_weight
+                        )
+                    else:
+                        wav = self.model.generate(
+                            chunk_text,
+                            exaggeration=self.exaggeration,
+                            cfg_weight=self.cfg_weight
+                        )
+                
+                tts_duration = time.time() - tts_start_time
+                memory_after_tts = self._get_memory_usage()
+                
+                # Calculate performance metrics and log appropriately
                 text_len = len(chunk_text)
                 word_count = len(chunk_text.split())
                 punct_count = sum(1 for c in chunk_text if c in '.,!?;:')
                 complexity_score = (punct_count / max(word_count, 1)) * 100  # Punctuation density as complexity proxy
                 
-                if tts_duration > 12:  # Only warn for slow generations (lowered threshold)
-                    logging.warning(f"🔍 TTS generation slow: {tts_duration:.1f}s, GPU growth: {gpu_growth:.1f}MB, Tensor growth: {tensor_growth}, Text: {text_len}chars/{word_count}words/complexity:{complexity_score:.1f}%")
-                elif tts_duration > 10:  # Info for moderately slow
-                    logging.info(f"🔍 TTS timing: {tts_duration:.1f}s, GPU growth: {gpu_growth:.1f}MB, Tensor growth: {tensor_growth}, Text: {text_len}chars/{word_count}words")
-                elif self.debug_memory:
-                    logging.info(f"🔍 TTS timing: {tts_duration:.1f}s, GPU growth: {gpu_growth:.1f}MB, Tensor growth: {tensor_growth}, Text: {text_len}chars/{word_count}words")
-            
-            # Apply pitch shift if specified
-            wav = self.apply_pitch_shift(wav)
-            
-            # Save audio
-            ta.save(str(output_file), wav, self.model.sr)
-            
-            # Immediate cleanup
-            del wav
-            
-            # Light cleanup after generation (deep cleanup handled periodically)
-            if self.device == "mps":
-                torch.mps.empty_cache()
-            elif self.device == "cuda":
-                torch.cuda.empty_cache()
-            
-            # Performance monitoring and adaptive cleanup
-            chunk_duration = time.time() - chunk_start_time
-            
-            # Log detailed timing breakdown for debugging
-            generation_time = chunk_duration - 0.8  # Subtract the sleep time
-            if generation_time > 12:  # Log slow generations (lowered threshold)
-                memory_after = self._get_memory_usage()
-                logging.warning(f"🐌 Slow chunk generation: {generation_time:.1f}s (GPU: {memory_after.get('gpu_allocated_mb', 0):.0f}MB, Tensors: {memory_after.get('torch_tensor_count', 0)})")
-            
-            if self.adaptive_cleanup and self._detect_performance_degradation(chunk_duration):
-                self.severe_degradation_count += 1
-                logging.warning(f"⚠️ Performance degradation detected ({self.severe_degradation_count}/{self.model_reinit_threshold})")
+                # Get performance metrics based on text complexity
+                perf_metrics = self._calculate_performance_metrics(tts_duration, text_len, word_count, chunk_text)
+                performance_ratio = perf_metrics["performance_ratio"]
+                chars_per_sec = perf_metrics["chars_per_sec"]
+                expected_time = perf_metrics["expected_time"]
                 
-                if self.severe_degradation_count >= self.model_reinit_threshold:
-                    # Try model reinitialization as last resort (lowered threshold for faster recovery)
-                    logging.info(f"🔄 Triggering model reinitialization after {self.severe_degradation_count} severe degradations")
-                    if self._reinitialize_model():
-                        logging.info("✅ Model reinitialized successfully - performance should improve")
+                # Log based on performance ratio rather than absolute time
+                should_log_detailed = (performance_ratio > 1.8 or self.debug_memory)  # 80% slower than expected
+                
+                if should_log_detailed:
+                    gpu_growth = memory_after_tts.get('gpu_allocated_mb', 0) - memory_before_tts.get('gpu_allocated_mb', 0)
+                    tensor_growth = memory_after_tts.get('torch_tensor_count', 0) - memory_before_tts.get('torch_tensor_count', 0)
+                    
+                    if performance_ratio > 2.5:  # >2.5x slower than expected
+                        logging.warning(f"🔍 TTS generation slow: {tts_duration:.1f}s (expected {expected_time:.1f}s, {performance_ratio:.1f}x), {chars_per_sec:.1f} chars/s, GPU growth: {gpu_growth:.1f}MB, Text: {text_len}chars/{word_count}words/complexity:{complexity_score:.1f}%")
+                    elif performance_ratio > 1.8:  # >1.8x slower than expected
+                        logging.info(f"🔍 TTS timing: {tts_duration:.1f}s (expected {expected_time:.1f}s, {performance_ratio:.1f}x), {chars_per_sec:.1f} chars/s, GPU growth: {gpu_growth:.1f}MB, Text: {text_len}chars/{word_count}words")
+                    elif self.debug_memory:
+                        logging.info(f"🔍 TTS timing: {tts_duration:.1f}s (expected {expected_time:.1f}s, {performance_ratio:.1f}x), {chars_per_sec:.1f} chars/s, GPU growth: {gpu_growth:.1f}MB, Text: {text_len}chars/{word_count}words")
+                
+                # Apply pitch shift if specified
+                wav = self.apply_pitch_shift(wav)
+                
+                # Save audio
+                ta.save(str(output_file), wav, self.model.sr)
+                
+                # Validate generated audio
+                validation_result = AudioValidator.validate_audio_chunk(output_file, chunk_text)
+                
+                if not validation_result["is_valid"]:
+                    logging.warning(f"🔍 Audio validation failed (attempt {attempt + 1}):")
+                    for issue in validation_result["issues"]:
+                        logging.warning(f"   - {issue}")
+                    
+                    # Log metrics for debugging
+                    metrics = validation_result["metrics"]
+                    if metrics:
+                        duration = metrics.get("duration", 0)
+                        rms = metrics.get("rms_level", 0)
+                        words_per_min = metrics.get("words_per_minute", 0)
+                        max_amp = metrics.get("max_amplitude", 0)
+                        logging.warning(f"   Metrics: {duration:.2f}s, RMS:{rms:.4f}, {words_per_min:.0f}WPM, MaxAmp:{max_amp:.3f}")
+                    
+                    # Clean up failed audio and try again (unless last attempt)
+                    if output_file.exists():
+                        output_file.unlink()
+                    del wav
+                    
+                    if attempt < max_retries:
+                        logging.info(f"   Retrying with aggressive cleanup...")
+                        continue
                     else:
-                        logging.error("❌ Model reinitialization failed, continuing with aggressive cleanup")
+                        logging.error(f"❌ Audio validation failed after {max_retries + 1} attempts")
+                        return False
+                else:
+                    # Validation passed
+                    if is_retry:
+                        logging.info(f"✅ Audio validation passed on retry attempt {attempt}")
+                    elif validation_result["issues"]:
+                        # Has minor issues but still valid
+                        logging.info(f"⚠️ Audio generated with minor issues:")
+                        for issue in validation_result["issues"]:
+                            logging.info(f"   - {issue}")
+                    
+                    # Log detailed metrics if debug enabled or if there were issues
+                    if self.debug_memory or validation_result["issues"]:
+                        metrics = validation_result["metrics"]
+                        duration = metrics.get("duration", 0)
+                        rms = metrics.get("rms_level", 0)
+                        words_per_min = metrics.get("words_per_minute", 0)
+                        max_amp = metrics.get("max_amplitude", 0)
+                        volume_var = metrics.get("volume_variance", 0)
+                        logging.info(f"🔍 Audio metrics: {duration:.2f}s, RMS:{rms:.4f}, {words_per_min:.0f}WPM, MaxAmp:{max_amp:.3f}, VolVar:{volume_var:.2f}")
+                
+                # Immediate cleanup
+                del wav
+                
+                # Light cleanup after generation (deep cleanup handled periodically)
+                if self.device == "mps":
+                    torch.mps.empty_cache()
+                elif self.device == "cuda":
+                    torch.cuda.empty_cache()
+                
+                # Performance monitoring and adaptive cleanup (only on successful generation)
+                chunk_duration = time.time() - chunk_start_time
+                
+                # Use text-aware performance detection for final chunk timing
+                chunk_perf_metrics = self._calculate_performance_metrics(chunk_duration, text_len, word_count, chunk_text)
+                chunk_performance_ratio = chunk_perf_metrics["performance_ratio"]
+                
+                # Log detailed timing breakdown for debugging (only if significantly slow relative to text)
+                if chunk_performance_ratio > 2.0:  # 2x slower than expected for this text length
+                    memory_after = self._get_memory_usage()
+                    expected_chunk_time = chunk_perf_metrics["expected_time"]
+                    logging.warning(f"🐌 Slow chunk generation: {chunk_duration:.1f}s (expected {expected_chunk_time:.1f}s, {chunk_performance_ratio:.1f}x slower) (GPU: {memory_after.get('gpu_allocated_mb', 0):.0f}MB, Tensors: {memory_after.get('torch_tensor_count', 0)})")
+                
+                if self.adaptive_cleanup and self._detect_performance_degradation(chunk_duration, text_len, word_count, chunk_text):
+                    self.severe_degradation_count += 1
+                    logging.warning(f"⚠️ Performance degradation detected ({self.severe_degradation_count}/{self.model_reinit_threshold})")
+                    
+                    if self.severe_degradation_count >= self.model_reinit_threshold:
+                        # Try model reinitialization as last resort (lowered threshold for faster recovery)
+                        logging.info(f"🔄 Triggering model reinitialization after {self.severe_degradation_count} severe degradations")
+                        if self._reinitialize_model():
+                            logging.info("✅ Model reinitialized successfully - performance should improve")
+                        else:
+                            logging.error("❌ Model reinitialization failed, continuing with aggressive cleanup")
+                            self._force_memory_cleanup(aggressive=True)
+                            self.chunks_since_cleanup = 0
+                            self.performance_history = []
+                            self.severe_degradation_count = 0
+                    else:
+                        # Try aggressive cleanup first
+                        logging.info("🧹 Triggering aggressive cleanup")
                         self._force_memory_cleanup(aggressive=True)
                         self.chunks_since_cleanup = 0
                         self.performance_history = []
-                        self.severe_degradation_count = 0
+                
+                return True
+                
+            except torch.mps.OutOfMemoryError as e:
+                logging.error(f"MPS out of memory generating chunk (attempt {attempt + 1}): {e}")
+                # Force aggressive cleanup on OOM and reset counter
+                self._force_memory_cleanup(aggressive=True)
+                self.chunks_since_cleanup = 0
+                self.performance_history = []  # Reset history
+                
+                if attempt < max_retries:
+                    logging.info("Retrying after OOM cleanup...")
+                    continue
                 else:
-                    # Try aggressive cleanup first
-                    logging.info("🧹 Triggering aggressive cleanup")
-                    self._force_memory_cleanup(aggressive=True)
-                    self.chunks_since_cleanup = 0
-                    self.performance_history = []
-            
-            return True
-            
-        except torch.mps.OutOfMemoryError as e:
-            logging.error(f"MPS out of memory generating chunk: {e}")
-            # Force aggressive cleanup on OOM and reset counter
-            self._force_memory_cleanup(aggressive=True)
-            self.chunks_since_cleanup = 0
-            self.performance_history = []  # Reset history
-            return False
-        except Exception as e:
-            logging.error(f"Error generating chunk: {e}")
-            return False
+                    return False
+                    
+            except Exception as e:
+                logging.error(f"Error generating chunk (attempt {attempt + 1}): {e}")
+                if attempt < max_retries:
+                    logging.info("Retrying after error...")
+                    continue
+                else:
+                    return False
+        
+        # Should not reach here
+        return False
     
     def process_audiobook(self, input_file: Path, time_limit: Optional[int] = None) -> Path:
         """Process entire audiobook with chunking and parallel processing"""
@@ -1479,7 +2172,8 @@ class AudiobookTTS:
                 mp3_enabled=self.mp3_enabled,
                 mp3_bitrate=self.mp3_bitrate,
                 remove_wav=self.remove_wav,
-                metadata=self.metadata
+                metadata=self.metadata,
+                smart_split=self.smart_split
             )
             
             if split_files:
@@ -1647,7 +2341,13 @@ Examples:
         "--split-minutes",
         type=int,
         default=5,
-        help="Split output into files of maximum X minutes each (default: 5, set to 0 to disable)"
+        help="Split output into files of maximum X minutes each with sentence boundary awareness (default: 5, set to 0 to disable)"
+    )
+    
+    parser.add_argument(
+        "--disable-smart-split",
+        action="store_true",
+        help="Disable sentence-aware splitting and use fixed time intervals (may cut mid-sentence)"
     )
     
     parser.add_argument(
@@ -1719,7 +2419,8 @@ Examples:
     logging.info(f"   Workers: {args.workers}")
     
     if args.split_minutes > 0:
-        logging.info(f"   File splitting: enabled (max {args.split_minutes} minutes per file)")
+        split_mode = "fixed intervals" if args.disable_smart_split else "sentence-aware"
+        logging.info(f"   File splitting: enabled (max {args.split_minutes} minutes per file, {split_mode})")
         output_format = "MP3" if args.mp3 else "WAV"
         logging.info(f"   Output format: {output_format}")
         if args.mp3:
@@ -1755,7 +2456,8 @@ Examples:
             split_minutes=args.split_minutes,
             memory_cleanup_interval=args.memory_cleanup_interval,
             debug_memory=args.debug_memory,
-            metadata=metadata
+            metadata=metadata,
+            smart_split=not args.disable_smart_split
         )
         
         # Process audiobook
