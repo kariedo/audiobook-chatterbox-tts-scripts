@@ -19,7 +19,10 @@ Converts text files and ebooks into complete audiobooks with professional featur
 
 **Features:**
 - Supports `.txt`, `.epub`, `.fb2`, `.md` files
-- Smart text chunking for optimal processing
+- **🎯 Smart sentence-aware text chunking** - Ensures complete sentences in each WAV file
+- **🔍 Advanced audio validation** - Automatically detects and retries problematic audio chunks
+- **✂️ Intelligent sentence-aware MP3 splitting** - Prevents mid-sentence cuts using silence detection
+- **📊 Text-length-relative performance monitoring** - Accurate detection of processing issues
 - Parallel processing for faster generation
 - Resume capability (picks up where you left off)
 - Voice cloning support
@@ -27,7 +30,7 @@ Converts text files and ebooks into complete audiobooks with professional featur
 - Pitch and voice characteristic control
 - **🎵 Automatic MP3 conversion with FFmpeg**
 - **📱 Configurable bitrates for quality vs file size**
-- **✂️ Time-limited file splitting (5 minutes default)**
+- **⏰ Time-limited file splitting (5 minutes default)**
 - **📝 Proper file naming convention: `<filename>_001.mp3`, `<filename>_002.mp3`**
 - **🧹 Optional WAV file cleanup to save disk space**
 - **🏷️ MP3 metadata tagging with author and book title**
@@ -46,7 +49,7 @@ python audiobook_tts.py book.txt --mp3 --split-minutes 3
 # Single file output (disable splitting)
 python audiobook_tts.py book.txt --mp3 --split-minutes 0
 
-# Advanced usage with custom settings
+# Advanced usage with custom settings and smart splitting
 python audiobook_tts.py novel.epub \
   --voice voices/narrator.wav \
   --limit-minutes 60 \
@@ -59,6 +62,9 @@ python audiobook_tts.py novel.epub \
   --split-minutes 7 \
   --remove-wav
 
+# Disable smart splitting for compatibility with older workflows
+python audiobook_tts.py book.txt --mp3 --disable-smart-split
+
 # High-quality MP3 with 10-minute segments and metadata
 python audiobook_tts.py book.txt --mp3 --mp3-bitrate 320k --split-minutes 10 --tag "Author Name - Book Title"
 
@@ -68,6 +74,8 @@ python audiobook_tts.py book.txt --mp3 --mp3-bitrate 96k --split-minutes 3 --rem
 
 **File Splitting Options:**
 - `--split-minutes X`: Split into X-minute files (default: 5, set to 0 to disable)
+- **🎯 Smart sentence-aware splitting**: Automatically detects sentence boundaries to prevent mid-sentence cuts
+- `--disable-smart-split`: Use traditional time-based splitting for compatibility
 - Creates files with naming convention: `<filename>_001.mp3`, `<filename>_002.mp3`, etc.
 - File extension is removed from base filename automatically
 - Works with both MP3 and WAV output formats
@@ -353,10 +361,12 @@ your_project/
 
 - **M4 Mac:** Uses MPS acceleration automatically with optimized memory management
 - **Parallel Processing:** Uses 1 worker for MPS devices, 2-4 workers for other systems
-- **Optimal Chunk Size:** Default 200 characters works best
+- **Smart Chunking:** Intelligent sentence boundary detection for optimal processing
+- **Audio Quality:** Automatic validation and retry system ensures reliable output
+- **Performance Monitoring:** Text-length-aware performance detection prevents false slow warnings
 - **Memory Management:** Aggressive GPU cache clearing and memory synchronization
 - **Resume Feature:** Large books can be processed in sessions with `--limit-minutes`
-- **File Splitting:** Happens automatically after audio generation completes
+- **File Splitting:** Smart sentence-aware splitting happens automatically after audio generation
 - **MP3 Conversion:** Optimized for speech content with minimal processing overhead
 - **Progress Tracking:** Real-time ETA and completion percentage display
 - **Clean Output:** Dependency warnings automatically suppressed for cleaner logs
