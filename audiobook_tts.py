@@ -609,7 +609,9 @@ class ProgressTracker:
             "completed_chunks": [],
             "failed_chunks": [],
             "start_time": None,
-            "last_update": None
+            "last_update": None,
+            "session_start_time": None,
+            "chunk_times": []  # Store completion times for rate calculation
         }
     
     def save_progress(self):
@@ -626,6 +628,19 @@ class ProgressTracker:
         """Mark a chunk as completed"""
         if chunk_index not in self.progress["completed_chunks"]:
             self.progress["completed_chunks"].append(chunk_index)
+            
+            # Store completion time for rate calculation
+            completion_time = datetime.now().isoformat()
+            if "chunk_times" not in self.progress:
+                self.progress["chunk_times"] = []
+            self.progress["chunk_times"].append({
+                "chunk": chunk_index,
+                "time": completion_time
+            })
+            
+            # Keep only last 50 completion times for rate calculation
+            if len(self.progress["chunk_times"]) > 50:
+                self.progress["chunk_times"] = self.progress["chunk_times"][-50:]
         
         # Remove from failed if it was there
         if chunk_index in self.progress["failed_chunks"]:
@@ -649,6 +664,51 @@ class ProgressTracker:
         completed = len(self.progress["completed_chunks"])
         failed = len(self.progress["failed_chunks"])
         return completed, failed, total
+    
+    def calculate_eta(self) -> Tuple[str, float]:
+        """Calculate estimated time to completion"""
+        completed = len(self.progress["completed_chunks"])
+        total = self.progress["total_chunks"]
+        
+        if completed == 0 or not self.progress.get("session_start_time"):
+            return "Calculating...", 0.0
+        
+        # Calculate time elapsed since session start
+        session_start = datetime.fromisoformat(self.progress["session_start_time"])
+        elapsed_seconds = (datetime.now() - session_start).total_seconds()
+        
+        if elapsed_seconds <= 0:
+            return "Calculating...", 0.0
+        
+        # Calculate chunks per second
+        chunks_per_second = completed / elapsed_seconds
+        
+        if chunks_per_second <= 0:
+            return "Calculating...", 0.0
+        
+        # Calculate remaining time
+        remaining_chunks = total - completed
+        remaining_seconds = remaining_chunks / chunks_per_second
+        
+        # Format time
+        if remaining_seconds < 60:
+            eta_str = f"{remaining_seconds:.0f}s"
+        elif remaining_seconds < 3600:
+            minutes = int(remaining_seconds // 60)
+            seconds = int(remaining_seconds % 60)
+            eta_str = f"{minutes}m {seconds}s"
+        else:
+            hours = int(remaining_seconds // 3600)
+            minutes = int((remaining_seconds % 3600) // 60)
+            eta_str = f"{hours}h {minutes}m"
+        
+        return eta_str, chunks_per_second
+    
+    def set_session_start(self):
+        """Mark the start of the current processing session"""
+        if not self.progress.get("session_start_time"):
+            self.progress["session_start_time"] = datetime.now().isoformat()
+            self.save_progress()
 
 class AudiobookTTS:
     """Main TTS audiobook generator"""
@@ -833,6 +893,9 @@ class AudiobookTTS:
         
         logging.info(f"🚀 Processing {len(chunks_to_process)} remaining chunks...")
         
+        # Set session start time for ETA calculation
+        progress.set_session_start()
+        
         # Time limit setup
         start_time = datetime.now()
         time_limit_reached = False
@@ -900,9 +963,15 @@ class AudiobookTTS:
                     else:
                         failed_count += 1
                     
-                    # Progress update
+                    # Progress update with ETA
                     total_completed, total_failed, total_chunks = progress.get_completion_stats()
-                    logging.info(f"📊 Progress: {total_completed}/{total_chunks} completed, {total_failed} failed")
+                    eta_str, chunks_per_sec = progress.calculate_eta()
+                    
+                    # Calculate percentage
+                    percentage = (total_completed / total_chunks * 100) if total_chunks > 0 else 0
+                    
+                    logging.info(f"📊 Progress: {total_completed}/{total_chunks} ({percentage:.1f}%) completed, {total_failed} failed")
+                    logging.info(f"⏱️ ETA: {eta_str} (Rate: {chunks_per_sec:.1f} chunks/sec)")
                     
                 except Exception as e:
                     logging.error(f"Chunk processing error: {e}")
