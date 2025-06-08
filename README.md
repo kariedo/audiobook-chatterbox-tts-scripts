@@ -183,6 +183,42 @@ python voice_pitch_tuner.py --pitch-variations --voice voices/myvoice.wav
 
 ---
 
+### 🔍 `bad_ending_detector.py` - TTS Ending Quality Analyzer
+Standalone tool for detecting problematic TTS audio endings with artifacts, distorted sound effects, or unnatural audio patterns.
+
+**Features:**
+- Analyzes the final 5 seconds of audio files for problematic patterns
+- Detects rising energy trends that indicate TTS artifacts
+- Provides confidence scoring and detailed metrics
+- Batch processing for analyzing multiple files
+- Visualization output with energy trend graphs
+- Comprehensive pattern classification
+
+**Usage:**
+```bash
+# Analyze a single audio file
+python bad_ending_detector.py chunk_0001.wav
+
+# Analyze with visualization output
+python bad_ending_detector.py chunk_0001.wav --visualize
+
+# Batch analyze all WAV files in a directory
+python bad_ending_detector.py --batch ./audiobook_output/
+
+# Analyze last 3 seconds instead of default 5
+python bad_ending_detector.py chunk_0001.wav --duration 3.0
+```
+
+**Detection Patterns:**
+- **Problematic Rising Trend**: Energy increases and stays elevated at the end
+- **Sustained Elevation**: Audio doesn't fade naturally after speech
+- **Normal Fade**: Proper audio ending with natural energy decay
+
+**Integration with Main System:**
+The detection algorithm from this tool is automatically integrated into `audiobook_tts.py` for real-time quality control during generation. Use this standalone tool for manual analysis or debugging specific audio files.
+
+---
+
 ### 🎤 `voice_harvester.py` - Voice Sample Extractor
 Extracts clean voice segments from audiobooks, podcasts, or recordings for TTS voice cloning.
 
@@ -491,6 +527,7 @@ The audiobook generator now provides detailed progress information during genera
 - Use `voice_pitch_tuner.py` to find optimal settings
 - Test with short samples before full books
 - Check voice sample quality with `voice_harvester.py`
+- Analyze problematic audio endings with `bad_ending_detector.py`
 
 **MP3 Conversion and File Splitting Issues:**
 - Ensure FFmpeg is installed: `ffmpeg -version`
