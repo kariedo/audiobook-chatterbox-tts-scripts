@@ -3,7 +3,10 @@ venv/*
 extracted_voices/
 *.mp3
 *.epub
-*.txt
 *.wav
 *.json
 *.aifc
+*.png
+
+# Allow specific files
+!requirements.txt

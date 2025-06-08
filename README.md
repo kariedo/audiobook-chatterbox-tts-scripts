@@ -306,18 +306,44 @@ done
 
 ## 🛠️ Installation
 
-### Prerequisites
+### Quick Setup (Recommended)
+
 ```bash
-# Install Python dependencies
-pip install torch torchaudio chatterbox-tts
+# 1. Clone the repository
+git clone <repository-url>
+cd audiobook-chatterbox-tts-scripts
 
-# Optional dependencies for enhanced features
-pip install ebooklib beautifulsoup4  # Better EPUB support
-pip install sounddevice              # For voice recording
-pip install requests                 # For web content extraction
+# 2. Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Required for MP3 conversion and file splitting
-# Install FFmpeg (required for --mp3 flag and --split-minutes)
+# 3. Install all dependencies
+pip install -r requirements.txt
+
+# 4. Install FFmpeg for MP3 conversion and file splitting
+# See FFmpeg installation guide below
+
+# 5. Test the installation
+python audiobook_tts.py --help
+```
+
+### Manual Installation
+
+```bash
+# Core dependencies (required)
+pip install torch>=2.0.0 torchaudio>=2.0.0 chatterbox-tts
+
+# Audio processing
+pip install librosa>=0.10.0 sounddevice>=0.4.0 scipy>=1.10.0 numpy>=1.24.0
+
+# Text and file format support
+pip install beautifulsoup4>=4.12.0 requests>=2.28.0 ebooklib>=0.18
+
+# System utilities
+pip install psutil>=5.9.0
+
+# Or install everything at once:
+pip install -r requirements.txt
 ```
 
 ### FFmpeg Installation for MP3 Conversion and File Splitting

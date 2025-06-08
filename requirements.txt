@@ -1,0 +1,22 @@
+# Core TTS and Audio Processing
+torch>=2.0.0
+torchaudio>=2.0.0
+chatterbox-tts
+
+# Audio Analysis and Processing
+librosa>=0.10.0
+sounddevice>=0.4.0
+scipy>=1.10.0
+numpy>=1.24.0
+
+# Text Processing and File Format Support
+beautifulsoup4>=4.12.0
+requests>=2.28.0
+ebooklib>=0.18
+
+# System and Utilities  
+psutil>=5.9.0
+pathlib-mate>=1.0.0
+
+# Optional: For performance monitoring (already included in standard library)
+# json, re, subprocess, hashlib, math, datetime, concurrent.futures, typing
