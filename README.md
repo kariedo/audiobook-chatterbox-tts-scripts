@@ -308,28 +308,38 @@ done
 
 ### Quick Setup (Recommended)
 
+**Important:** Chatterbox TTS requires Python 3.11 or earlier. Python 3.12+ is not currently supported.
+
 ```bash
 # 1. Clone the repository
 git clone <repository-url>
 cd audiobook-chatterbox-tts-scripts
 
-# 2. Create and activate virtual environment
-python3 -m venv venv
+# 2. Create and activate virtual environment with Python 3.11
+python3.11 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# 3. Install all dependencies
+# 3. Verify Python version (should be 3.11.x)
+python --version
+
+# 4. Install all dependencies
 pip install -r requirements.txt
 
-# 4. Install FFmpeg for MP3 conversion and file splitting
+# 5. Install FFmpeg for MP3 conversion and file splitting
 # See FFmpeg installation guide below
 
-# 5. Test the installation
+# 6. Test the installation
 python audiobook_tts.py --help
 ```
 
 ### Manual Installation
 
+**Prerequisites:** Python 3.11 or earlier (Python 3.12+ not supported by Chatterbox TTS)
+
 ```bash
+# Verify Python version first
+python --version  # Should be 3.11.x or earlier
+
 # Core dependencies (required)
 pip install torch>=2.0.0 torchaudio>=2.0.0 chatterbox-tts
 
@@ -344,6 +354,25 @@ pip install psutil>=5.9.0
 
 # Or install everything at once:
 pip install -r requirements.txt
+```
+
+### Python Version Compatibility
+
+- **✅ Supported:** Python 3.8, 3.9, 3.10, 3.11
+- **❌ Not Supported:** Python 3.12 and newer
+- **Recommended:** Python 3.11 (tested and verified working)
+
+If you have Python 3.12+ installed, install Python 3.11 alongside it:
+
+```bash
+# macOS (using Homebrew)
+brew install python@3.11
+
+# Ubuntu/Debian
+sudo apt install python3.11 python3.11-venv
+
+# Windows
+# Download Python 3.11 from python.org and install
 ```
 
 ### FFmpeg Installation for MP3 Conversion and File Splitting
