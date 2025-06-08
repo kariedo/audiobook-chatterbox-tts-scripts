@@ -39,6 +39,9 @@ os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
 import torch
 import torchaudio as ta
 from chatterbox.tts import ChatterboxTTS
+import librosa
+import numpy as np
+from scipy.ndimage import gaussian_filter1d
 
 # Setup logging with timestamps
 logging.basicConfig(
@@ -1318,6 +1321,106 @@ class AudioValidator:
         return float(variance)
 
 
+class EndingDetector:
+    """Detects problematic TTS endings where RMS energy rises and stays elevated"""
+    
+    def __init__(self):
+        self.sample_rate = 24000
+        
+    def analyze_ending_pattern(self, audio_file: Path, analysis_duration: float = 5.0) -> dict:
+        """Analyze the ending pattern of an audio file"""
+        try:
+            audio, sr = librosa.load(str(audio_file), sr=self.sample_rate)
+            duration = len(audio) / sr
+            
+            if duration < analysis_duration:
+                return {'is_problematic': False, 'reason': f'Audio too short ({duration:.2f}s)'}
+                
+            # Extract the last N seconds
+            start_sample = len(audio) - int(analysis_duration * sr)
+            ending_segment = audio[start_sample:]
+            
+            # Calculate RMS energy in small windows
+            window_size = int(sr * 0.1)  # 100ms windows
+            hop_size = int(sr * 0.05)    # 50ms hop
+            
+            rms_values = []
+            for i in range(0, len(ending_segment) - window_size, hop_size):
+                window = ending_segment[i:i + window_size]
+                rms = np.sqrt(np.mean(window ** 2))
+                rms_values.append(rms)
+            
+            rms_values = np.array(rms_values)
+            if len(rms_values) < 10:
+                return {'is_problematic': False, 'reason': 'Insufficient data for analysis'}
+                
+            # Smooth the RMS values
+            rms_smooth = gaussian_filter1d(rms_values, sigma=2)
+            
+            # Find the minimum RMS value and its position
+            min_idx = np.argmin(rms_smooth)
+            min_rms = rms_smooth[min_idx]
+            
+            # Analyze what happens after the minimum
+            remaining_frames = len(rms_smooth) - min_idx
+            if remaining_frames < 8:
+                return {'is_problematic': False, 'reason': 'Not enough data after minimum'}
+                
+            post_min_values = rms_smooth[min_idx:]
+            
+            # Focus on final 25% for true ending trend
+            final_25_pct = int(len(post_min_values) * 0.75)
+            if final_25_pct < len(post_min_values) and len(post_min_values) - final_25_pct >= 3:
+                final_values = post_min_values[final_25_pct:]
+                final_indices = np.arange(len(final_values))
+                final_slope = np.polyfit(final_indices, final_values, 1)[0]
+            else:
+                final_slope = 0
+                
+            # Check if the very end (last 10%) is higher than mid-point
+            last_10_pct_idx = int(len(post_min_values) * 0.9)
+            if last_10_pct_idx < len(post_min_values):
+                mid_point_rms = np.mean(post_min_values[len(post_min_values)//2:int(len(post_min_values)*0.8)])
+                end_10_pct_rms = np.mean(post_min_values[last_10_pct_idx:])
+                end_vs_mid_ratio = end_10_pct_rms / (mid_point_rms + 1e-10)
+            else:
+                end_vs_mid_ratio = 1.0
+                
+            # Compare first quarter vs last quarter after minimum
+            quarter_len = len(post_min_values) // 4
+            if quarter_len > 1:
+                first_quarter = np.mean(post_min_values[:quarter_len])
+                last_quarter = np.mean(post_min_values[-quarter_len:])
+                quarter_ratio = last_quarter / (first_quarter + 1e-10)
+            else:
+                quarter_ratio = 1.0
+                
+            # Look at the final value compared to minimum
+            end_rms = rms_smooth[-1]
+            end_recovery_ratio = end_rms / (min_rms + 1e-10)
+            
+            # DETECTION LOGIC: Final portion has upward trend AND end stays elevated
+            is_problematic = False
+            reason = 'normal_fade'
+            
+            if (final_slope > min_rms * 0.1 and end_vs_mid_ratio > 2.0):
+                if (end_recovery_ratio > 5.0 and quarter_ratio > 3.0):
+                    is_problematic = True
+                    reason = f'Rising trend detected: final_slope={final_slope:.6f}, end/mid_ratio={end_vs_mid_ratio:.2f}, recovery={end_recovery_ratio:.2f}x'
+            
+            return {
+                'is_problematic': is_problematic,
+                'reason': reason,
+                'final_slope': final_slope,
+                'end_vs_mid_ratio': end_vs_mid_ratio,
+                'end_recovery_ratio': end_recovery_ratio,
+                'quarter_ratio': quarter_ratio
+            }
+            
+        except Exception as e:
+            return {'is_problematic': False, 'reason': f'Analysis error: {e}'}
+
+
 class AudiobookTTS:
     """Main TTS audiobook generator"""
     
@@ -1388,11 +1491,16 @@ class AudiobookTTS:
         # Initial cleanup after warmup
         self._force_memory_cleanup()
         
+        # Initialize ending detector for quality control
+        self.ending_detector = EndingDetector()
+        self.regenerated_chunks_count = 0
+        
         logging.info(f"✅ TTS model ready for audiobook generation")
         logging.info(f"   Voice settings: exag={self.exaggeration}, cfg={self.cfg_weight}")
         if self.pitch_shift != 0:
             logging.info(f"   Pitch shift: {self.pitch_shift:+.1f} semitones")
         logging.info(f"   Memory cleanup interval: every {self.cleanup_interval} chunks")
+        logging.info(f"   Ending detection enabled for quality control")
     
     def apply_pitch_shift(self, wav: torch.Tensor) -> torch.Tensor:
         """Apply pitch shifting to generated audio"""
@@ -2007,6 +2115,32 @@ class AudiobookTTS:
             memory_stats = self._get_memory_usage()
             
             if success:
+                # Check for problematic endings and re-generate if needed
+                detection_result = self.ending_detector.analyze_ending_pattern(chunk_file)
+                if detection_result['is_problematic']:
+                    logging.warning(f"🔍 Chunk {chunk_index:04d} has problematic ending: {detection_result['reason']}")
+                    logging.info(f"🔄 Re-generating chunk {chunk_index:04d} to fix ending issue...")
+                    
+                    # Remove the problematic chunk
+                    if chunk_file.exists():
+                        chunk_file.unlink()
+                    
+                    # Re-generate the chunk (with one retry)
+                    regeneration_success = self.generate_chunk(chunk_text, chunk_file, max_retries=1)
+                    if regeneration_success:
+                        # Check the re-generated chunk
+                        recheck_result = self.ending_detector.analyze_ending_pattern(chunk_file)
+                        if recheck_result['is_problematic']:
+                            logging.warning(f"⚠️ Chunk {chunk_index:04d} still problematic after regeneration, keeping anyway")
+                        else:
+                            logging.info(f"✅ Chunk {chunk_index:04d} regeneration successful - ending issue resolved")
+                        self.regenerated_chunks_count += 1
+                        logging.info(f"📊 Total chunks regenerated: {self.regenerated_chunks_count}")
+                    else:
+                        logging.error(f"❌ Failed to regenerate chunk {chunk_index:04d}, keeping original")
+                        # Restore original chunk by regenerating without ending check
+                        self.generate_chunk(chunk_text, chunk_file, max_retries=0)
+                
                 progress.mark_chunk_completed(chunk_index)
                 try:
                     audio_length = ta.info(str(chunk_file)).num_frames / ta.info(str(chunk_file)).sample_rate
@@ -2467,6 +2601,12 @@ Examples:
         )
         
         logging.info(f"🎉 Audiobook generation complete! Check: {output_dir}")
+        
+        # Show regenerated chunks statistics
+        if tts_generator.regenerated_chunks_count > 0:
+            logging.info(f"🔄 Quality control: {tts_generator.regenerated_chunks_count} chunks were regenerated due to ending issues")
+        else:
+            logging.info(f"✅ Quality control: All chunks passed ending detection")
         
         # List final output files
         final_files = []
