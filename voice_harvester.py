@@ -54,8 +54,26 @@ class VoiceHarvester:
                 if segment_duration < 3.0:
                     continue
                 
-                # Trim to desired length
-                if segment_duration > segment_length:
+                # Extend short segments to target length if possible
+                if segment_duration < segment_length:
+                    # Calculate how much to extend
+                    extension_needed = segment_length - segment_duration
+                    half_extension = extension_needed / 2
+                    
+                    # Extend both directions, but don't go beyond audio bounds
+                    new_start = max(0, start - half_extension)
+                    new_end = min(duration, end + half_extension)
+                    
+                    # If we hit a boundary, extend more in the other direction
+                    if new_start == 0:
+                        new_end = min(duration, new_start + segment_length)
+                    elif new_end == duration:
+                        new_start = max(0, new_end - segment_length)
+                    
+                    start, end = new_start, new_end
+                
+                # Trim to desired length if still too long
+                elif segment_duration > segment_length:
                     # Take from the middle for best quality
                     mid_point = (start + end) / 2
                     start = mid_point - segment_length / 2
@@ -71,7 +89,8 @@ class VoiceHarvester:
                     output_file = output_dir / f"voice_segment_{extracted_count:03d}.wav"
                     ta.save(str(output_file), segment, sample_rate)
                     
-                    logging.info(f"✅ Extracted: {output_file.name} ({segment_duration:.1f}s)")
+                    final_duration = (end - start)
+                    logging.info(f"✅ Extracted: {output_file.name} ({final_duration:.1f}s)")
                     extracted_count += 1
                     
                     # Limit number of extractions
@@ -133,9 +152,9 @@ class VoiceHarvester:
     def _is_good_quality(self, segment: torch.Tensor, sample_rate: int) -> bool:
         """Check if audio segment is good quality for TTS"""
         
-        # Check for minimum length
+        # Check for minimum length  
         duration = segment.shape[1] / sample_rate
-        if duration < 3.0:
+        if duration < 12.0:  # Require at least 12s for good TTS quality
             return False
         
         # Check for reasonable volume
@@ -174,7 +193,7 @@ class VoiceHarvester:
             extracted = self.extract_clean_segments(
                 audio_file, 
                 voice_output_dir,
-                segment_length=10  # 10-second segments
+                segment_length=15  # 15-second segments
             )
             
             total_extracted += extracted
@@ -262,8 +281,8 @@ Examples:
     parser.add_argument(
         "--segment-length",
         type=int,
-        default=10,
-        help="Target segment length in seconds (default: 10)"
+        default=15,
+        help="Target segment length in seconds (default: 15)"
     )
     
     parser.add_argument(
