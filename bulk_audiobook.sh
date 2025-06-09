@@ -23,9 +23,9 @@ if [ ! -f "$URL_FILE" ]; then
     exit 1
 fi
 
-echo "🚀 Starting bulk audiobook generation"
-echo "📁 Input file: $URL_FILE"
-echo "📂 Output directory: $OUTPUT_DIR"
+echo "Starting bulk audiobook generation"
+echo "Input file: $URL_FILE"
+echo "Output directory: $OUTPUT_DIR"
 
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
@@ -36,7 +36,7 @@ while IFS= read -r url || [ -n "$url" ]; do
     [[ -z "$url" || "$url" =~ ^[[:space:]]*# ]] && continue
     
     echo ""
-    echo "🌐 Processing: $url"
+    echo "Processing: $url"
     
     # Extract content and generate audiobook
     if python html_extractor.py "$url"; then
@@ -45,32 +45,38 @@ while IFS= read -r url || [ -n "$url" ]; do
         txt_file=$(ls "${domain}"*.txt 2>/dev/null | head -1)
         
         if [ -n "$txt_file" ] && [ -f "$txt_file" ]; then
-            echo "📖 Generating audiobook from: $txt_file"
-            echo "🎯 TTS Options: $TTS_OPTIONS"
+            echo "Generating audiobook from: $txt_file"
+            echo "TTS Options: $TTS_OPTIONS"
+            
+            # Get base filename without extension for matching generated files
+            base_name=$(basename "$txt_file" .txt)
+            
             python audiobook_tts.py "$txt_file" --mp3 --split-minutes 10 $TTS_OPTIONS
             
-            # Copy all MP3 files to output directory
-            if ls *.mp3 1> /dev/null 2>&1; then
-                echo "📦 Copying MP3 files to $OUTPUT_DIR/"
-                cp *.mp3 "$OUTPUT_DIR/"
-                rm *.mp3
+            # Copy MP3 files from the generated audiobook directory
+            audiobook_dir="${base_name}"
+            if [ -d "$audiobook_dir" ] && ls "$audiobook_dir"/*.mp3 1> /dev/null 2>&1; then
+                echo "Copying MP3 files from $audiobook_dir/ to $OUTPUT_DIR/"
+                cp "$audiobook_dir"/*.mp3 "$OUTPUT_DIR/"
+                echo "Found $(ls -1 "$audiobook_dir"/*.mp3 | wc -l) MP3 files"
+            else
+                echo "No MP3 files found in $audiobook_dir/ directory"
             fi
             
-            # Cleanup
+            # Cleanup text file only (keep audiobook directory with WAV files)
             rm -f "$txt_file"
-            rm -rf "${txt_file%.*}"/
             
-            echo "✅ Completed: $url"
+            echo "Completed: $url"
         else
-            echo "❌ Could not find extracted text file for: $url"
+            echo "Could not find extracted text file for: $url"
         fi
     else
-        echo "❌ Failed to extract content from: $url"
+        echo "Failed to extract content from: $url"
     fi
     
 done < "$URL_FILE"
 
 echo ""
-echo "🎉 Bulk processing complete!"
-echo "📂 All audiobooks saved to: $OUTPUT_DIR/"
-echo "📊 Total files: $(ls -1 "$OUTPUT_DIR"/*.mp3 2>/dev/null | wc -l)"
+echo "Bulk processing complete!"
+echo "All audiobooks saved to: $OUTPUT_DIR/"
+echo "Total files: $(ls -1 "$OUTPUT_DIR"/*.mp3 2>/dev/null | wc -l)"
