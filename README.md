@@ -258,14 +258,22 @@ Processes multiple URLs from a text file and generates audiobooks with organized
 - Organizes all output files into named directory structure
 - Automatic cleanup between processing cycles
 - Progress tracking and error reporting
+- **Pass-through TTS parameters** - All audiobook_tts.py options supported
+- **Flexible voice and quality settings** - Customize per batch
 
 **Usage:**
 ```bash
 # Make script executable (first time only)
 chmod +x bulk_audiobook.sh
 
-# Process URLs from file
+# Basic usage - process URLs from file
 ./bulk_audiobook.sh urls.txt
+
+# With custom TTS parameters
+./bulk_audiobook.sh urls.txt --exaggeration 0.6 --cfg-weight 0.8 --workers 2 --voice extracted_voices/voice_segment_012.wav
+
+# With different voice settings and quality
+./bulk_audiobook.sh urls.txt --pitch-shift -1 --mp3-bitrate 192k --remove-wav
 ```
 
 **Input File Format (urls.txt):**
@@ -296,9 +304,10 @@ urls/                           # Directory named after input file
 5. Report success/failure for each URL
 
 **Configuration:**
-- **Split Duration:** 10 minutes per MP3 file (modify `--split-minutes 10` in script)
+- **Split Duration:** 10 minutes per MP3 file (default, override with `--split-minutes N`)
 - **Output Directory:** Named after input file without extension
-- **MP3 Quality:** Uses default 128k bitrate (modify `--mp3-bitrate` in script)
+- **MP3 Quality:** Uses default 128k bitrate (override with `--mp3-bitrate XXXk`)
+- **TTS Parameters:** All audiobook_tts.py options can be passed as arguments
 - **Error Handling:** Continues processing remaining URLs if one fails
 
 **Integration Example:**
@@ -316,12 +325,20 @@ EOF
 # Result: tech_articles/ directory with all audiobook files organized
 ```
 
-**Customization:**
-Edit the script to modify default settings:
-- Change `--split-minutes 10` for different segment lengths
-- Add `--mp3-bitrate 192k` for higher quality
-- Add `--remove-wav` for automatic cleanup
-- Add `--tag "Author - Collection"` for metadata
+**Parameter Examples:**
+```bash
+# High quality with custom voice
+./bulk_audiobook.sh urls.txt --voice voices/narrator.wav --mp3-bitrate 192k
+
+# Fast processing with parallel workers
+./bulk_audiobook.sh urls.txt --workers 3 --split-minutes 5
+
+# Custom voice characteristics
+./bulk_audiobook.sh urls.txt --exaggeration 0.4 --cfg-weight 0.6 --pitch-shift +2
+
+# Space-saving mobile version
+./bulk_audiobook.sh urls.txt --mp3-bitrate 96k --split-minutes 3 --remove-wav
+```
 
 ---
 
