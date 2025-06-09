@@ -5,13 +5,16 @@
 
 set -e
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <url_list.txt>"
+if [ $# -lt 1 ]; then
+    echo "Usage: $0 <url_list.txt> [audiobook_tts_options...]"
     echo "Example: $0 urls.txt"
+    echo "Example: $0 urls.txt --exaggeration 0.6 --cfg-weight 0.8 --workers 2 --voice extracted_voices/voice_segment_012.wav"
     exit 1
 fi
 
 URL_FILE="$1"
+shift  # Remove first argument, rest are TTS options
+TTS_OPTIONS="$@"
 BASE_NAME=$(basename "$URL_FILE" .txt)
 OUTPUT_DIR="$BASE_NAME"
 
@@ -43,7 +46,8 @@ while IFS= read -r url || [ -n "$url" ]; do
         
         if [ -n "$txt_file" ] && [ -f "$txt_file" ]; then
             echo "📖 Generating audiobook from: $txt_file"
-            python audiobook_tts.py "$txt_file" --mp3 --split-minutes 10
+            echo "🎯 TTS Options: $TTS_OPTIONS"
+            python audiobook_tts.py "$txt_file" --mp3 --split-minutes 10 $TTS_OPTIONS
             
             # Copy all MP3 files to output directory
             if ls *.mp3 1> /dev/null 2>&1; then

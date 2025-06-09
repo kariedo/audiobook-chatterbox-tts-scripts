@@ -248,6 +248,83 @@ python voice_harvester.py --librivox-info
 
 ---
 
+### 🚀 `bulk_audiobook.sh` - Bulk URL Processing Script
+Processes multiple URLs from a text file and generates audiobooks with organized output.
+
+**Features:**
+- Batch process multiple URLs from a single input file  
+- Extracts content using `html_extractor.py`
+- Generates audiobooks with MP3 conversion and splitting
+- Organizes all output files into named directory structure
+- Automatic cleanup between processing cycles
+- Progress tracking and error reporting
+
+**Usage:**
+```bash
+# Make script executable (first time only)
+chmod +x bulk_audiobook.sh
+
+# Process URLs from file
+./bulk_audiobook.sh urls.txt
+```
+
+**Input File Format (urls.txt):**
+```
+https://example.com/article1.html
+https://example.com/article2.html  
+# This is a comment - will be skipped
+https://news.site.com/story.html
+https://blog.example.com/essay.html
+```
+
+**Output Structure:**
+```
+urls/                           # Directory named after input file
+├── article1_001.mp3           # First URL's audiobook files
+├── article1_002.mp3
+├── article2_001.mp3           # Second URL's audiobook files  
+├── article2_002.mp3
+├── story_001.mp3              # Third URL's audiobook files
+└── essay_001.mp3              # Fourth URL's audiobook files
+```
+
+**Processing Steps Per URL:**
+1. Extract web content to clean text file (`domain_filename.txt`)
+2. Generate audiobook with MP3 conversion and 10-minute splitting
+3. Copy all MP3 files to organized output directory  
+4. Clean up temporary files between URLs
+5. Report success/failure for each URL
+
+**Configuration:**
+- **Split Duration:** 10 minutes per MP3 file (modify `--split-minutes 10` in script)
+- **Output Directory:** Named after input file without extension
+- **MP3 Quality:** Uses default 128k bitrate (modify `--mp3-bitrate` in script)
+- **Error Handling:** Continues processing remaining URLs if one fails
+
+**Integration Example:**
+```bash
+# Create URL list
+cat > tech_articles.txt << EOF
+https://example.com/article1.html
+https://blog.site.com/tutorial.html  
+https://news.example.com/feature.html
+EOF
+
+# Process all articles
+./bulk_audiobook.sh tech_articles.txt
+
+# Result: tech_articles/ directory with all audiobook files organized
+```
+
+**Customization:**
+Edit the script to modify default settings:
+- Change `--split-minutes 10` for different segment lengths
+- Add `--mp3-bitrate 192k` for higher quality
+- Add `--remove-wav` for automatic cleanup
+- Add `--tag "Author - Collection"` for metadata
+
+---
+
 ### 🌐 `html_extractor.py` - Web Content to Text Converter
 Extracts clean, readable text from web pages and local HTML files for audiobook generation.
 
