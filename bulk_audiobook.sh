@@ -9,6 +9,7 @@ if [ $# -lt 1 ]; then
     echo "Usage: $0 <url_list.txt> [audiobook_tts_options...]"
     echo "Example: $0 urls.txt"
     echo "Example: $0 urls.txt --exaggeration 0.6 --cfg-weight 0.8 --workers 2 --voice extracted_voices/voice_segment_012.wav"
+    echo "Example: $0 urls.txt --config high_quality.toml"
     exit 1
 fi
 
