@@ -768,27 +768,37 @@ class AudiobookTTS:
                 detection_result = self.ending_detector.analyze_ending_pattern(chunk_file)
                 if detection_result['is_problematic']:
                     logging.warning(f"🔍 Chunk {chunk_index:04d} has problematic ending: {detection_result['reason']}")
-                    logging.info(f"🔄 Re-generating chunk {chunk_index:04d} to fix ending issue...")
                     
-                    # Remove the problematic chunk
-                    if chunk_file.exists():
-                        chunk_file.unlink()
+                    # Try regeneration up to 4 times
+                    max_regeneration_attempts = 4
+                    regeneration_successful = False
                     
-                    # Re-generate the chunk (with one retry)
-                    regeneration_success = self.generate_chunk(chunk_text, chunk_file, max_retries=1)
-                    if regeneration_success:
-                        # Check the re-generated chunk
-                        recheck_result = self.ending_detector.analyze_ending_pattern(chunk_file)
-                        if recheck_result['is_problematic']:
-                            logging.warning(f"⚠️ Chunk {chunk_index:04d} still problematic after regeneration, keeping anyway")
+                    for regen_attempt in range(max_regeneration_attempts):
+                        logging.info(f"🔄 Re-generating chunk {chunk_index:04d} (attempt {regen_attempt + 1}/{max_regeneration_attempts}) to fix ending issue...")
+                        
+                        # Remove the problematic chunk
+                        if chunk_file.exists():
+                            chunk_file.unlink()
+                        
+                        # Re-generate the chunk
+                        regeneration_success = self.generate_chunk(chunk_text, chunk_file, max_retries=1)
+                        if regeneration_success:
+                            # Check the re-generated chunk
+                            recheck_result = self.ending_detector.analyze_ending_pattern(chunk_file)
+                            if not recheck_result['is_problematic']:
+                                logging.info(f"✅ Chunk {chunk_index:04d} regeneration successful - ending issue resolved (attempt {regen_attempt + 1})")
+                                regeneration_successful = True
+                                break
+                            else:
+                                logging.warning(f"🔄 Chunk {chunk_index:04d} still problematic after attempt {regen_attempt + 1}: {recheck_result['reason']}")
                         else:
-                            logging.info(f"✅ Chunk {chunk_index:04d} regeneration successful - ending issue resolved")
-                        self.regenerated_chunks_count += 1
-                        logging.info(f"📊 Total chunks regenerated: {self.regenerated_chunks_count}")
-                    else:
-                        logging.error(f"❌ Failed to regenerate chunk {chunk_index:04d}, keeping original")
-                        # Restore original chunk by regenerating without ending check
-                        self.generate_chunk(chunk_text, chunk_file, max_retries=0)
+                            logging.error(f"❌ Failed to regenerate chunk {chunk_index:04d} on attempt {regen_attempt + 1}")
+                    
+                    if not regeneration_successful:
+                        logging.warning(f"⚠️ Chunk {chunk_index:04d} still problematic after {max_regeneration_attempts} regeneration attempts, keeping anyway")
+                    
+                    self.regenerated_chunks_count += 1
+                    logging.info(f"📊 Total chunks regenerated: {self.regenerated_chunks_count}")
                 
                 progress.mark_chunk_completed(chunk_index)
                 try:
