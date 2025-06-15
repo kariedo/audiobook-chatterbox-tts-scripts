@@ -1,0 +1,73 @@
+# Chatterbox TTS Configuration File
+# Customize these settings for your audiobook generation needs
+
+[tts]
+# Voice cloning and TTS settings
+# voice_file = "voices/myvoice.wav"    # Path to voice reference file (uncomment and set path)
+exaggeration = 0.8                   # Voice exaggeration level (0.2-1.2, lower=higher pitch)
+cfg_weight = 0.8                     # CFG weight (0.2-1.0, lower=lighter voice)
+pitch_shift = 0.0                    # Pitch shift in semitones (+/-12, positive=higher)
+max_workers = 2                      # Number of parallel workers (1-16)
+memory_cleanup_interval = 5          # Clean memory every N chunks
+debug_memory = false                 # Enable detailed memory debugging
+
+[audio]
+# Audio output and conversion settings
+mp3_enabled = false                  # Enable MP3 conversion
+mp3_bitrate = "128k"                 # MP3 bitrate (64k, 96k, 128k, 160k, 192k, 256k, 320k)
+remove_wav = false                   # Remove WAV files after MP3 conversion
+split_minutes = 5                    # Split audio files into N-minute segments
+smart_split = true                   # Use sentence boundary detection for splitting
+silence_threshold = -35.0            # Silence detection threshold in dB
+min_silence_duration = 0.3           # Minimum silence duration for split detection (seconds)
+
+[processing]
+# Text processing and quality control
+max_chunk_chars = 200                # Maximum characters per TTS chunk (50-1000)
+min_chunk_chars = 50                 # Minimum characters per TTS chunk (10-200)
+# limit_minutes = 60                   # Maximum processing time in minutes (uncomment to set limit)
+validate_audio = true                # Enable audio quality validation
+regeneration_attempts = 4            # Number of attempts to fix problematic audio (1-10)
+ending_detection = true              # Enable problematic ending detection
+
+[output]
+# Output directory and metadata settings
+output_dir_template = "{filename}"   # Output directory naming template
+# metadata_artist = "Narrator Name"    # Default artist for MP3 metadata
+# metadata_album = "Book Title"        # Default album for MP3 metadata
+metadata_genre = "Audiobook"         # Default genre for MP3 metadata
+preserve_structure = true            # Preserve original file structure
+
+# Profile Examples:
+# Copy this file and modify for different use cases
+
+# Fast Processing Profile:
+# [tts]
+# max_workers = 4
+# exaggeration = 0.6
+# [audio]
+# mp3_bitrate = "96k"
+# [processing]
+# regeneration_attempts = 2
+# validate_audio = false
+
+# High Quality Profile:
+# [tts]
+# max_workers = 1
+# exaggeration = 0.9
+# cfg_weight = 0.9
+# [audio]
+# mp3_bitrate = "256k"
+# smart_split = true
+# [processing]
+# regeneration_attempts = 6
+# validate_audio = true
+
+# Mobile/Compact Profile:
+# [audio]
+# mp3_enabled = true
+# mp3_bitrate = "64k"
+# remove_wav = true
+# split_minutes = 3
+# [processing]
+# max_chunk_chars = 150
