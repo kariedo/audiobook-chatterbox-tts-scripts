@@ -48,6 +48,7 @@ from audio_converter import AudioConverter, AudioSplitter
 from text_processor import TextProcessor, TextChunker
 from audio_validator import AudioValidator, EndingDetector
 from progress_tracker import ProgressTracker
+from config import ConfigManager, create_default_config
 
 # Setup logging with timestamps
 logging.basicConfig(
@@ -73,11 +74,18 @@ def setup_mac_compatibility():
 class AudiobookTTS:
     """Main TTS audiobook generator"""
     
-    def __init__(self, voice_file: Optional[str] = None, max_workers: int = 2, 
-                 exaggeration: float = 0.8, cfg_weight: float = 0.8, pitch_shift: float = 0.0,
-                 mp3_bitrate: str = "128k", mp3_enabled: bool = False, remove_wav: bool = False,
-                 split_minutes: int = 5, memory_cleanup_interval: int = 5, debug_memory: bool = False,
-                 metadata: dict = None, smart_split: bool = True):
+    def __init__(self, config_manager: ConfigManager, metadata: dict = None):
+        # Store configuration and metadata
+        self.config = config_manager.config
+        self.metadata = metadata or {}
+        
+        # Extract commonly used config values as instance attributes
+        self.voice_file = self.config.tts.voice_file
+        self.exaggeration = self.config.tts.exaggeration
+        self.cfg_weight = self.config.tts.cfg_weight
+        self.pitch_shift = self.config.tts.pitch_shift
+        self.debug_memory = getattr(self.config.processing, 'debug_memory', False)
+        
         self.device = setup_mac_compatibility()
         logging.info(f"Initializing Chatterbox TTS on {self.device}...")
         
@@ -88,50 +96,31 @@ class AudiobookTTS:
             torch.mps.empty_cache()
         
         self.model = ChatterboxTTS.from_pretrained(device=self.device)
-        self.voice_file = voice_file
+        
         # Reduce default workers for MPS to prevent OOM
-        self.max_workers = 1 if self.device == "mps" else max_workers
-        
-        # Voice characteristics settings
-        self.exaggeration = exaggeration
-        self.cfg_weight = cfg_weight
-        self.pitch_shift = pitch_shift  # Semitones to shift pitch
-        
-        # MP3 conversion settings
-        self.mp3_enabled = mp3_enabled
-        self.mp3_bitrate = mp3_bitrate
-        self.remove_wav = remove_wav
-        
-        # File splitting settings
-        self.split_minutes = split_minutes
-        self.smart_split = smart_split
-        
-        # MP3 metadata settings
-        self.metadata = metadata or {}
+        self.max_workers = 1 if self.device == "mps" else self.config.tts.max_workers
         
         # Check FFmpeg availability if MP3 is enabled or splitting is requested
-        if self.mp3_enabled or self.split_minutes > 0:
+        if self.config.audio.mp3_enabled or self.config.audio.split_minutes > 0:
             if not AudioConverter.check_ffmpeg_available():
-                if self.mp3_enabled:
+                if self.config.audio.mp3_enabled:
                     logging.warning("⚠️ FFmpeg not found - MP3 conversion will be disabled")
-                    self.mp3_enabled = False
-                if self.split_minutes > 0:
+                    self.config.audio.mp3_enabled = False
+                if self.config.audio.split_minutes > 0:
                     logging.warning("⚠️ FFmpeg not found - File splitting will be disabled")
-                    self.split_minutes = 0
+                    self.config.audio.split_minutes = 0
             else:
-                if self.mp3_enabled:
-                    logging.info(f"🎵 MP3 conversion enabled (bitrate: {mp3_bitrate})")
-                if self.split_minutes > 0:
-                    logging.info(f"✂️ File splitting enabled (max {split_minutes} minutes per file)")
+                if self.config.audio.mp3_enabled:
+                    logging.info(f"🎵 MP3 conversion enabled (bitrate: {self.config.audio.mp3_bitrate})")
+                if self.config.audio.split_minutes > 0:
+                    logging.info(f"✂️ File splitting enabled (max {self.config.audio.split_minutes} minutes per file)")
         
         # Initialize memory tracking and performance monitoring
         self.chunks_since_cleanup = 0
-        self.cleanup_interval = memory_cleanup_interval  # Clear cache every N chunks
         self.performance_history = []  # Track processing times to detect slowdown
         self.adaptive_cleanup = True  # Enable adaptive cleanup based on performance
         self.severe_degradation_count = 0  # Count severe performance issues
         self.model_reinit_threshold = 2  # Reinitialize model after N severe degradations (lowered for faster recovery)
-        self.debug_memory = debug_memory  # Enable detailed memory debugging
         
         # Warmup
         with torch.no_grad():
@@ -148,7 +137,7 @@ class AudiobookTTS:
         logging.info(f"   Voice settings: exag={self.exaggeration}, cfg={self.cfg_weight}")
         if self.pitch_shift != 0:
             logging.info(f"   Pitch shift: {self.pitch_shift:+.1f} semitones")
-        logging.info(f"   Memory cleanup interval: every {self.cleanup_interval} chunks")
+        logging.info(f"   Memory cleanup interval: every {self.config.tts.memory_cleanup_interval} chunks")
         logging.info(f"   Ending detection enabled for quality control")
     
     def apply_pitch_shift(self, wav: torch.Tensor) -> torch.Tensor:
@@ -507,8 +496,8 @@ class AudiobookTTS:
                         torch.cuda.empty_cache()
                     
                     # Periodic deep cleanup
-                    if self.chunks_since_cleanup >= self.cleanup_interval:
-                        logging.info(f"🧹 Performing periodic memory cleanup (every {self.cleanup_interval} chunks)")
+                    if self.chunks_since_cleanup >= self.config.tts.memory_cleanup_interval:
+                        logging.info(f"🧹 Performing periodic memory cleanup (every {self.config.tts.memory_cleanup_interval} chunks)")
                         self._force_memory_cleanup()
                         self.chunks_since_cleanup = 0
                     elif self.chunks_since_cleanup % 2 == 0:
@@ -665,18 +654,23 @@ class AudiobookTTS:
                 
                 return True
                 
-            except torch.mps.OutOfMemoryError as e:
-                logging.error(f"MPS out of memory generating chunk (attempt {attempt + 1}): {e}")
-                # Force aggressive cleanup on OOM and reset counter
-                self._force_memory_cleanup(aggressive=True)
-                self.chunks_since_cleanup = 0
-                self.performance_history = []  # Reset history
-                
-                if attempt < max_retries:
-                    logging.info("Retrying after OOM cleanup...")
-                    continue
+            except RuntimeError as e:
+                # Check if this is an MPS out of memory error
+                if "MPS" in str(e) and ("out of memory" in str(e).lower() or "memory" in str(e).lower()):
+                    logging.error(f"MPS out of memory generating chunk (attempt {attempt + 1}): {e}")
+                    # Force aggressive cleanup on OOM and reset counter
+                    self._force_memory_cleanup(aggressive=True)
+                    self.chunks_since_cleanup = 0
+                    self.performance_history = []  # Reset history
+                    
+                    if attempt < max_retries:
+                        logging.info("Retrying after OOM cleanup...")
+                        continue
+                    else:
+                        return False
                 else:
-                    return False
+                    # Re-raise non-MPS runtime errors
+                    raise
                     
             except Exception as e:
                 logging.error(f"Error generating chunk (attempt {attempt + 1}): {e}")
@@ -769,8 +763,8 @@ class AudiobookTTS:
                 if detection_result['is_problematic']:
                     logging.warning(f"🔍 Chunk {chunk_index:04d} has problematic ending: {detection_result['reason']}")
                     
-                    # Try regeneration up to 4 times
-                    max_regeneration_attempts = 4
+                    # Try regeneration up to configured times
+                    max_regeneration_attempts = self.config.processing.regeneration_attempts
                     regeneration_successful = False
                     
                     for regen_attempt in range(max_regeneration_attempts):
@@ -954,19 +948,19 @@ class AudiobookTTS:
         # Handle file splitting and MP3 conversion
         final_output_files = []
         
-        if self.split_minutes > 0:
+        if self.config.audio.split_minutes > 0:
             # Split the combined audiobook into time-limited files
-            logging.info(f"✂️ Splitting audiobook into {self.split_minutes}-minute segments...")
+            logging.info(f"✂️ Splitting audiobook into {self.config.audio.split_minutes}-minute segments...")
             
             split_files = AudioSplitter.split_audio_by_time(
                 input_file=final_wav_file,
                 output_base_name=base_filename,
-                max_minutes=self.split_minutes,
-                mp3_enabled=self.mp3_enabled,
-                mp3_bitrate=self.mp3_bitrate,
-                remove_wav=self.remove_wav,
+                max_minutes=self.config.audio.split_minutes,
+                mp3_enabled=self.config.audio.mp3_enabled,
+                mp3_bitrate=self.config.audio.mp3_bitrate,
+                remove_wav=self.config.audio.remove_wav,
                 metadata=self.metadata,
-                smart_split=self.smart_split
+                smart_split=self.config.audio.smart_split
             )
             
             if split_files:
@@ -974,7 +968,7 @@ class AudiobookTTS:
                 logging.info(f"📱 Split audiobook into {len(split_files)} files")
                 
                 # Remove the combined file if split was successful and we're keeping MP3 only
-                if self.remove_wav and self.mp3_enabled:
+                if self.config.audio.remove_wav and self.config.audio.mp3_enabled:
                     try:
                         final_wav_file.unlink()
                         logging.info(f"🗑️ Removed combined WAV file: {final_wav_file.name}")
@@ -984,7 +978,7 @@ class AudiobookTTS:
                 logging.warning("⚠️ File splitting failed, keeping combined file")
                 final_output_files = [final_wav_file]
         
-        elif self.mp3_enabled:
+        elif self.config.audio.mp3_enabled:
             # Convert to MP3 without splitting
             final_mp3_file = output_dir / f"{base_filename}.mp3"
             logging.info("🔄 Converting final audiobook to MP3...")
@@ -992,8 +986,8 @@ class AudiobookTTS:
             conversion_success = AudioConverter.convert_to_mp3(
                 wav_file=final_wav_file,
                 mp3_file=final_mp3_file,
-                bitrate=self.mp3_bitrate,
-                remove_wav=self.remove_wav,
+                bitrate=self.config.audio.mp3_bitrate,
+                remove_wav=self.config.audio.remove_wav,
                 metadata=self.metadata
             )
             
@@ -1015,7 +1009,7 @@ class AudiobookTTS:
             final_output_files = [final_wav_file]
         
         # Clean up individual chunk files if requested
-        if self.remove_wav and (self.mp3_enabled or self.split_minutes > 0):
+        if self.config.audio.remove_wav and (self.config.audio.mp3_enabled or self.config.audio.split_minutes > 0):
             self._cleanup_chunk_files(output_dir, total_chunks)
         
         # Log final output files
@@ -1070,6 +1064,11 @@ Examples:
     )
     
     parser.add_argument(
+        "--config",
+        help="Configuration file (TOML format)"
+    )
+    
+    parser.add_argument(
         "--voice",
         help="Voice reference file for cloning (e.g., voices/myvoice.wav)"
     )
@@ -1083,28 +1082,24 @@ Examples:
     parser.add_argument(
         "--workers",
         type=int,
-        default=2,
         help="Number of parallel workers (default: 2)"
     )
     
     parser.add_argument(
         "--exaggeration",
         type=float,
-        default=0.8,
         help="Voice exaggeration level (0.2-1.2, lower=higher pitch, default: 0.8)"
     )
     
     parser.add_argument(
         "--cfg-weight", 
         type=float,
-        default=0.8,
         help="CFG weight (0.2-1.0, lower=lighter voice, default: 0.8)"
     )
     
     parser.add_argument(
         "--pitch-shift",
         type=float,
-        default=0.0,
         help="Pitch shift in semitones (+/-4, positive=higher, negative=lower)"
     )
     
@@ -1118,7 +1113,6 @@ Examples:
     parser.add_argument(
         "--mp3-bitrate",
         type=str,
-        default="128k",
         choices=["64k", "96k", "128k", "160k", "192k", "256k", "320k"],
         help="MP3 bitrate for conversion (default: 128k)"
     )
@@ -1133,7 +1127,6 @@ Examples:
     parser.add_argument(
         "--split-minutes",
         type=int,
-        default=5,
         help="Split output into files of maximum X minutes each with sentence boundary awareness (default: 5, set to 0 to disable)"
     )
     
@@ -1163,7 +1156,48 @@ Examples:
         help="MP3 metadata in format 'Author - Book Title' (e.g., 'Arthur Conan Doyle - The Adventures of Sherlock Holmes')"
     )
     
+    parser.add_argument(
+        "--save-config",
+        help="Save current configuration to TOML file and exit"
+    )
+    
+    parser.add_argument(
+        "--list-config",
+        action="store_true",
+        help="Show current effective configuration and exit"
+    )
+    
     args = parser.parse_args()
+    
+    # Load configuration
+    try:
+        if args.config:
+            config_manager = ConfigManager(Path(args.config))
+        else:
+            config_manager = create_default_config()
+        
+        # Apply CLI arguments (highest precedence)
+        config_manager.apply_cli_args(args)
+        
+    except Exception as e:
+        logging.error(f"❌ Configuration error: {e}")
+        if "TOML support not available" in str(e):
+            logging.error("💡 Install TOML support with: pip install tomli")
+        sys.exit(1)
+    
+    # Handle special config commands
+    if args.save_config:
+        try:
+            config_manager.save_config(Path(args.save_config))
+            logging.info(f"💾 Configuration saved to {args.save_config}")
+            sys.exit(0)
+        except Exception as e:
+            logging.error(f"❌ Failed to save config: {e}")
+            sys.exit(1)
+    
+    if args.list_config:
+        config_manager.print_effective_config()
+        sys.exit(0)
     
     # Validate input file
     input_file = Path(args.input_file)
@@ -1203,30 +1237,31 @@ Examples:
             metadata['genre'] = 'Audiobook'
     
     # Log configuration
+    config = config_manager.config
     logging.info("🎙️ Audiobook TTS Generator Starting...")
     logging.info(f"   Input: {input_file}")
-    logging.info(f"   Voice: {args.voice or 'Default model voice'}")
-    logging.info(f"   Voice settings: exag={args.exaggeration}, cfg={args.cfg_weight}")
-    logging.info(f"   Pitch shift: {args.pitch_shift:+.1f} semitones")
-    logging.info(f"   Time limit: {args.limit_minutes or 'None'} minutes")
-    logging.info(f"   Workers: {args.workers}")
+    logging.info(f"   Voice: {config.tts.voice_file or 'Default model voice'}")
+    logging.info(f"   Voice settings: exag={config.tts.exaggeration}, cfg={config.tts.cfg_weight}")
+    logging.info(f"   Pitch shift: {config.tts.pitch_shift:+.1f} semitones")
+    logging.info(f"   Time limit: {config.processing.limit_minutes or 'None'} minutes")
+    logging.info(f"   Workers: {config.tts.max_workers}")
     
-    if args.split_minutes > 0:
-        split_mode = "fixed intervals" if args.disable_smart_split else "sentence-aware"
-        logging.info(f"   File splitting: enabled (max {args.split_minutes} minutes per file, {split_mode})")
-        output_format = "MP3" if args.mp3 else "WAV"
+    if config.audio.split_minutes > 0:
+        split_mode = "fixed intervals" if not config.audio.smart_split else "sentence-aware"
+        logging.info(f"   File splitting: enabled (max {config.audio.split_minutes} minutes per file, {split_mode})")
+        output_format = "MP3" if config.audio.mp3_enabled else "WAV"
         logging.info(f"   Output format: {output_format}")
-        if args.mp3:
-            logging.info(f"   MP3 bitrate: {args.mp3_bitrate}")
-    elif args.mp3:
-        logging.info(f"   MP3 conversion: enabled (bitrate: {args.mp3_bitrate})")
+        if config.audio.mp3_enabled:
+            logging.info(f"   MP3 bitrate: {config.audio.mp3_bitrate}")
+    elif config.audio.mp3_enabled:
+        logging.info(f"   MP3 conversion: enabled (bitrate: {config.audio.mp3_bitrate})")
         logging.info(f"   File splitting: disabled")
     else:
         logging.info("   MP3 conversion: disabled")
         logging.info("   File splitting: disabled")
     
-    if args.remove_wav:
-        logging.info(f"   Remove WAV files: {args.remove_wav}")
+    if config.audio.remove_wav:
+        logging.info(f"   Remove WAV files: {config.audio.remove_wav}")
     
     if metadata:
         logging.info("🏷️ MP3 Metadata:")
@@ -1236,27 +1271,16 @@ Examples:
             logging.info(f"   Book: {metadata['album']}")
     
     try:
-        # Initialize TTS generator
+        # Initialize TTS generator with configuration
         tts_generator = AudiobookTTS(
-            voice_file=args.voice,
-            max_workers=args.workers,
-            exaggeration=args.exaggeration,
-            cfg_weight=args.cfg_weight,
-            pitch_shift=args.pitch_shift,
-            mp3_enabled=args.mp3,
-            mp3_bitrate=args.mp3_bitrate,
-            remove_wav=args.remove_wav,
-            split_minutes=args.split_minutes,
-            memory_cleanup_interval=args.memory_cleanup_interval,
-            debug_memory=args.debug_memory,
-            metadata=metadata,
-            smart_split=not args.disable_smart_split
+            config_manager=config_manager,
+            metadata=metadata
         )
         
         # Process audiobook
         output_dir = tts_generator.process_audiobook(
             input_file=input_file,
-            time_limit=args.limit_minutes
+            time_limit=config.processing.limit_minutes
         )
         
         logging.info(f"🎉 Audiobook generation complete! Check: {output_dir}")
